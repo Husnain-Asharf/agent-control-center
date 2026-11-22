@@ -47,11 +47,26 @@ fn init_repo(dir: &Path) {
     git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"]);
 }
 
-/// Writes an executable stand-in for Claude Code.
+/// Writes an executable stand-in for Claude Code, acc-hook or a login shell,
+/// and runs it once with `WARM_UP` set, which makes it exit at once. Linux
+/// does not start a file that is open for writing (ETXTBSY), and a process
+/// another test forks while the script is written keeps it open until that
+/// process execs. Once it has started, it always will. macOS checks a new
+/// executable the first time it runs, which can take longer than the daemon
+/// gives a login shell when many tests start new scripts at once.
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match Command::new(&path).env("WARM_UP", "1").status() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            warmed_up => break assert!(warmed_up.unwrap().success(), "{name} did not warm up"),
+        }
+    }
     path
 }
 
@@ -1318,23 +1333,14 @@ fn merged_path(first: &[&str], claude_dir: &Path) -> String {
     dirs.join(":")
 }
 
-/// A login shell stand-in, which gets `-l -c <command>`. It has run once
-/// already: macOS checks a new executable the first time it runs, which can
-/// take longer than the daemon gives the login shell when many tests start
-/// new scripts at once.
-fn login_shell(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let shell = script(dir, name, &format!("[ -n \"$WARM_UP\" ] && exit 0\n{body}"));
-    assert!(Command::new(&shell).env("WARM_UP", "1").status().unwrap().success());
-    shell
-}
-
 #[tokio::test]
 async fn sessions_get_the_login_shell_path() {
     let h = Harness::new();
     let mut cfg = h.config(path_claude(h.tmp.path()));
-    // Like a login shell whose profile prints a banner and sets the PATH.
+    // Like a login shell whose profile prints a banner and sets the PATH. It
+    // gets `-l -c <command>`, so the command is `$3`.
     let shell = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$3\"";
-    cfg.login_shell = Some(login_shell(h.tmp.path(), "login-shell", shell));
+    cfg.login_shell = Some(script(h.tmp.path(), "login-shell", shell));
     let server = start(cfg).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Show the PATH").await;
@@ -1358,7 +1364,7 @@ async fn sessions_get_the_login_shell_path() {
 async fn sessions_get_the_install_folders_when_the_login_shell_fails() {
     let h = Harness::new();
     let mut cfg = h.config(path_claude(h.tmp.path()));
-    cfg.login_shell = Some(login_shell(h.tmp.path(), "broken-shell", "exit 1"));
+    cfg.login_shell = Some(script(h.tmp.path(), "broken-shell", "exit 1"));
     let server = start(cfg).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Show the PATH").await;

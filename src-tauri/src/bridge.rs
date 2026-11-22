@@ -380,6 +380,8 @@ fn start_accd(accd: &Path, data_dir: &Path) -> anyhow::Result<StartedAccd> {
 }
 
 /// The accd next to the app's executable, else the workspace build used during development.
+/// Every bundle puts it there: `Contents/MacOS` in the macOS app, `/usr/bin` from the .deb
+/// and the .rpm, and `usr/bin` in the mounted AppImage, which is where the executable runs from.
 pub fn accd_path() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -527,11 +529,23 @@ mod tests {
         }
     }
 
-    /// A shell script standing in for accd.
+    /// A shell script standing in for accd. It has run once already, with
+    /// `WARM_UP` set so it exits at once: Linux does not start a file that is
+    /// open for writing (ETXTBSY), and a process another test forks while the
+    /// script is written keeps it open until that process execs.
     fn fake_accd(dir: &Path, script: &str) -> PathBuf {
         let path = dir.join("fake-accd");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{script}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            match Command::new(&path).env("WARM_UP", "1").status() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                warmed_up => break assert!(warmed_up.unwrap().success()),
+            }
+        }
         path
     }
 
