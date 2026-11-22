@@ -64,9 +64,9 @@ pub fn find_claude(search_path: Option<&str>, home: Option<&Path>, is_executable
     on_path.map(|dir| Path::new(dir).join("claude")).chain(install_locations(home)).find(|candidate| is_executable(candidate))
 }
 
-/// The names `claude` has on Windows, in the order they are tried, as cmd
-/// tries the extensions of `PATHEXT`: the native `claude.exe`, then the
-/// batch files npm and other package managers make.
+/// The names `claude` has on Windows, in the order they are tried: the
+/// native `claude.exe`, then the batch files that npm and other package
+/// managers make.
 #[cfg(windows)]
 const CLAUDE_NAMES: [&str; 3] = ["claude.exe", "claude.cmd", "claude.bat"];
 
