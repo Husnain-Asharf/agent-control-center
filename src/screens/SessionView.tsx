@@ -3,7 +3,7 @@ import { ApprovalDock } from '../components/ApprovalDock';
 import { Lamp, STATUS_LABEL } from '../components/Lamp';
 import { errorText } from '../lib/errorText';
 import { eventText } from '../lib/eventText';
-import { clock, fmtTimer } from '../lib/format';
+import { clock, fmtTimer, worktreeLabel } from '../lib/format';
 import { request } from '../lib/ipc';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
@@ -69,7 +69,7 @@ export function SessionView() {
     request(method, { session_id: session.id }).catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
 
   const elapsed = (running ? now : (session.ended_at ?? session.status_since)) - session.started_at;
-  const worktree = `.worktrees/${session.worktree.split('/').filter(Boolean).pop() ?? ''}`;
+  const worktree = worktreeLabel(session.worktree);
 
   return (
     <div className="screen--flush agent">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clock, fmtDur, fmtTimer, monogram } from './format';
+import { clock, fmtDur, fmtTimer, monogram, worktreeLabel } from './format';
 
 describe('monogram', () => {
   it('uses the first letters of the first two words', () => {
@@ -45,5 +45,16 @@ describe('clock', () => {
   it('formats local time as HH:MM', () => {
     expect(clock(new Date(2026, 0, 1, 9, 5).getTime())).toBe('09:05');
     expect(clock(new Date(2026, 0, 1, 23, 40).getTime())).toBe('23:40');
+  });
+});
+
+describe('worktreeLabel', () => {
+  it('names the worktree folder', () => {
+    expect(worktreeLabel('/Users/x/my app/.worktrees/fix-the-bug')).toBe('.worktrees/fix-the-bug');
+    expect(worktreeLabel('/Users/x/app/.worktrees/fix/')).toBe('.worktrees/fix');
+  });
+  it('reads Windows paths, with either slash', () => {
+    expect(worktreeLabel('C:/Users/x/my app\\.worktrees\\fix-the-bug')).toBe('.worktrees/fix-the-bug');
+    expect(worktreeLabel('C:\\Users\\x\\app\\.worktrees\\fix')).toBe('.worktrees/fix');
   });
 });

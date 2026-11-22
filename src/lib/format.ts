@@ -29,3 +29,8 @@ export function clock(ts: number): string {
   const d = new Date(ts);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+/** `.worktrees/<slug>` for a session's worktree path, which has backslashes on Windows. */
+export function worktreeLabel(path: string): string {
+  return `.worktrees/${path.split(/[\\/]/).filter(Boolean).pop() ?? ''}`;
+}
