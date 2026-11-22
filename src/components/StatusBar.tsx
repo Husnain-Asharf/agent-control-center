@@ -1,4 +1,5 @@
 import { daemonStatusText } from '../lib/daemonStatus';
+import { isMac, keyHints } from '../lib/platform';
 import { useStore } from '../store/store';
 
 export function StatusBar() {
@@ -6,6 +7,7 @@ export function StatusBar() {
   const daemonError = useStore((s) => s.daemonError);
   const nSessions = useStore((s) => Object.keys(s.sessions).length);
   const nProjects = useStore((s) => Object.keys(s.projects).length);
+  const keys = keyHints(isMac);
   return (
     <footer className="statusbar">
       <span title={daemonError ?? undefined}>{daemonStatusText(connected, daemonError)}</span>
@@ -15,11 +17,13 @@ export function StatusBar() {
       </span>
       <span className="spacer" />
       <span>
-        <kbd className="kbd">⌘K</kbd> Commands
+        <kbd className="kbd">{keys.palette}</kbd> Commands
       </span>
-      <span>
-        <kbd className="kbd">⌘J</kbd> Next that needs you
-      </span>
+      {keys.nextNeeds && (
+        <span>
+          <kbd className="kbd">{keys.nextNeeds}</kbd> Next that needs you
+        </span>
+      )}
     </footer>
   );
 }
