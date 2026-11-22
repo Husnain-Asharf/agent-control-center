@@ -6,7 +6,16 @@ By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development setup
 
-You need macOS 13 or later, Rust stable 1.100 or newer, Node 23, git, and Claude Code installed and signed in (needed only for the real smoke test).
+You need macOS 13 or later or Linux on x86_64, Rust stable 1.100 or newer, Node 23, git, and Claude Code installed and signed in (needed only for the real smoke test).
+
+On Linux, install the system packages Tauri builds against first. On Debian and Ubuntu (22.04 or later):
+
+```
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+```
+
+For other distributions, see [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/#linux). Then, on either system:
 
 ```
 npm ci
@@ -16,7 +25,7 @@ npm run tauri dev
 
 `tauri-build` needs the bundled binaries, so `npm run sidecars` must run once on a fresh clone before `cargo build` or `cargo test`. `npm run tauri dev` runs it itself and builds `accd` and `acc-hook` first. A running `accd` keeps serving, even one from an older build. After you change the daemon or the hook, run `pkill accd` and start the app again.
 
-To make a release bundle, run `npm run tauri build`. Its `beforeBuildCommand` runs `npm run sidecars && npm run build`. `npm run sidecars` builds `accd` and `acc-hook` in release mode and copies them to `src-tauri/binaries/` as `accd-<target-triple>` and `acc-hook-<target-triple>`. They are bundled through `bundle.externalBin` and end up next to the app binary in `Contents/MacOS/`.
+To make a release bundle, run `npm run tauri build`. Its `beforeBuildCommand` runs `npm run sidecars && npm run build`. `npm run sidecars` builds `accd` and `acc-hook` in release mode and copies them to `src-tauri/binaries/` as `accd-<target-triple>` and `acc-hook-<target-triple>`. They are bundled through `bundle.externalBin` and end up next to the app binary: in `Contents/MacOS/` on macOS, and in `/usr/bin` from the `.deb` and `.rpm` or `usr/bin` inside the AppImage on Linux.
 
 ## Project layout
 
@@ -39,7 +48,7 @@ node scripts/smoke.mjs --fake   # end-to-end plumbing, no Claude
 node scripts/smoke.mjs          # end-to-end with real Claude Code
 ```
 
-The real smoke run starts Claude Code and makes it run a few commands, so it uses your Claude Code usage. Run it when you change session handling, approvals or the hook, and say so in the PR. CI runs the first three commands, not the smoke script. See [docs/testing.md](docs/testing.md).
+The real smoke run starts Claude Code and makes it run a few commands, so it uses your Claude Code usage. Run it when you change session handling, approvals or the hook, and say so in the PR. CI runs the first three commands on macOS and on Ubuntu 22.04, not the smoke script. See [docs/testing.md](docs/testing.md).
 
 ## Code style
 
@@ -72,7 +81,7 @@ Add a body only when the reason is not clear from the diff.
 
 ## Maintainers
 
-To release, bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-latest` (the Intel build is cross-compiled) and creates a draft GitHub release. Edit the notes and publish it.
+To release, bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-latest` (the Intel build is cross-compiled) and the `.AppImage`, `.deb` and `.rpm` on `ubuntu-22.04`, and attaches them all to one draft GitHub release. Edit the notes and publish it.
 
 Before the first release, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions). The first tagged release is the first real run of the workflow.
 
@@ -80,4 +89,4 @@ Upload `docs/images/social-preview.png` as the repository social preview (Settin
 
 ## Reporting bugs and proposing features
 
-Use the [issue forms](../../issues/new/choose). For a bug, include your macOS version, chip, app version, `claude --version`, and the relevant lines from `accd.log` in the data directory (remove secrets first). For a feature, describe the problem before the solution. For security issues do not open a public issue. See [SECURITY.md](SECURITY.md).
+Use the [issue forms](../../issues/new/choose). For a bug, include your system (macOS version and chip, or Linux distribution and version), app version, `claude --version`, and the relevant lines from `accd.log` in the data directory (remove secrets first). For a feature, describe the problem before the solution. For security issues do not open a public issue. See [SECURITY.md](SECURITY.md).

@@ -4,13 +4,14 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.2.x   | Yes       |
+| 0.1.x   | No        |
 
 ## Reporting a vulnerability
 
 Report vulnerabilities privately. Open the Security tab of this repository and choose "Report a vulnerability" (GitHub private vulnerability reporting). Do not open a public issue for a security problem.
 
-Include the app version, your macOS version, what you did, and what happened. We will reply as soon as we can and keep you updated until it is fixed.
+Include the app version, your system (macOS version or Linux distribution), what you did, and what happened. We will reply as soon as we can and keep you updated until it is fixed.
 
 ## Threat model
 

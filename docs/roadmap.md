@@ -1,6 +1,6 @@
 # Roadmap
 
-Plans, not promises. Linux is next, and Windows is planned.
+Linux (x86_64) is done, since 0.2.0. Windows is next.
 
 Plans, not promises:
 
@@ -9,4 +9,4 @@ Plans, not promises:
 - A policy editor for rules and protected paths.
 - Sandbox settings for Claude Code.
 - More agents, such as Codex and Gemini CLI, with honest per-agent capability flags.
-- Linux builds next, then Windows.
+- Windows builds.

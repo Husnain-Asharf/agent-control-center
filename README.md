@@ -1,9 +1,9 @@
 # Agent Control Center
 
-A free, open-source desktop app to run and supervise AI coding agents like Claude Code on macOS.
+A free, open-source desktop app to run and supervise AI coding agents like Claude Code on macOS and Linux.
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Platform: macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB.svg)
 ![Rust](https://img.shields.io/badge/Rust-daemon-orange.svg)
 ![React](https://img.shields.io/badge/React-UI-61DAFB.svg)
@@ -20,24 +20,47 @@ Agent Control Center runs several Claude Code sessions in one window. Each sessi
 - One approvals inbox with Allow once, Always allow and Deny.
 - "Always allow" never covers secrets files or risky commands.
 - An overview of all sessions and an activity log of every approval and event.
-- A Cmd+K command palette and keyboard shortcuts.
+- A command palette (Cmd+K, or Ctrl+K on Linux) and keyboard shortcuts.
 - A soft chime when a session needs you.
 
 ## Download and install
 
-1. Open the [latest release](../../releases/latest).
-2. Download the `.dmg` for your Mac: `aarch64` for Apple Silicon, `x64` for Intel.
-3. Open the `.dmg` and drag the app to Applications.
+Open the [latest release](../../releases/latest) and download the file for your system. The builds are unsigned.
 
-The builds are unsigned. On first open, right-click the app and choose Open, or remove the quarantine flag:
+### macOS
+
+1. Download the `.dmg` for your Mac: `aarch64` for Apple Silicon, `x64` for Intel.
+2. Open the `.dmg` and drag the app to Applications.
+
+On first open, right-click the app and choose Open, or remove the quarantine flag:
 
 ```
 xattr -dr com.apple.quarantine "/Applications/Agent Control Center.app"
 ```
 
+### Linux
+
+The Linux builds are for x86_64.
+
+- AppImage, for any distribution: make it executable, then run it.
+
+  ```
+  chmod +x <file>.AppImage
+  ./<file>.AppImage
+  ```
+
+  If it says it needs FUSE, install FUSE 2: `sudo apt install libfuse2` on Ubuntu 22.04, `libfuse2t64` on 24.04 and later.
+- `.deb`, for Debian and Ubuntu. It installs the app and what it needs:
+
+  ```
+  sudo apt install ./<file>.deb
+  ```
+
+- `.rpm`, for Fedora: `sudo dnf install ./<file>.rpm`.
+
 ## Requirements
 
-- macOS 13 or later (Apple Silicon or Intel).
+- macOS 13 or later (Apple Silicon or Intel), or Linux on x86_64 with glibc 2.35 or later, such as Ubuntu 22.04, Debian 12, Fedora 36 or newer.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and signed in. `claude` must work in a terminal.
 - git.
 
@@ -51,18 +74,18 @@ xattr -dr com.apple.quarantine "/Applications/Agent Control Center.app"
 
 | Key | Action |
 |-----|--------|
-| `Cmd+K` | Open the command palette |
-| `Cmd+J` | Jump to the next session that needs you |
+| `Cmd+K` (`Ctrl+K` on Linux) | Open the command palette |
+| `Cmd+J` (macOS only) | Jump to the next session that needs you |
 | `n` | New session |
 | `g` then `o`, `s`, `i`, `p`, `a` | Go to Overview, Sessions, Approvals, Projects, Activity |
 
 ## Platforms
 
-macOS 13+ today. Linux and Windows are planned. Contributions are welcome.
+macOS 13+ and Linux (x86_64). Windows is planned. Contributions are welcome.
 
 ## Build from source
 
-You need Rust stable, Node 23 and git.
+You need Rust stable, Node 23 and git. On Linux you also need the Tauri system packages listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```
 npm ci

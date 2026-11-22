@@ -32,26 +32,27 @@ body:
     validations:
       required: true
   - type: input
-    id: macos
+    id: system
     attributes:
-      label: macOS version
-      placeholder: "14.5"
+      label: System and version
+      placeholder: "macOS 14.5, or Ubuntu 24.04"
     validations:
       required: true
   - type: dropdown
     id: chip
     attributes:
-      label: Chip
+      label: Machine
       options:
-        - Apple Silicon
-        - Intel
+        - Mac with Apple Silicon
+        - Mac with Intel
+        - Linux x86_64
     validations:
       required: true
   - type: input
     id: app-version
     attributes:
       label: App version
-      placeholder: "0.1.0"
+      placeholder: "0.2.0"
     validations:
       required: true
   - type: input
@@ -65,5 +66,5 @@ body:
     id: log
     attributes:
       label: Relevant accd.log lines
-      description: From `~/Library/Application Support/AgentControlCenter/accd.log`. Remove secrets, tokens and private paths before pasting.
+      description: From `~/Library/Application Support/AgentControlCenter/accd.log` on macOS or `~/.local/share/AgentControlCenter/accd.log` on Linux. Remove secrets, tokens and private paths before pasting.
       render: text

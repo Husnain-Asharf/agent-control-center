@@ -4,7 +4,7 @@ This page has the full safety rules for Agent Control Center: how approvals work
 
 ## Session PATH and finding claude
 
-Sessions use the PATH from your login shell (`$SHELL -l`), read once when the first session starts. That can take up to 3 seconds. After it come the folders of the app's own PATH that it lacks, then the folder of the `claude` that was found. A PATH set only in `~/.zshrc`, typical for nvm, is not seen when the app is opened from Finder, so put it in `~/.zprofile`. If the login shell fails, takes longer, or prints no absolute folder, `accd.log` says why, and sessions get the app's PATH with `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and the folder of `claude` added. The app finds `claude` on that PATH, or in `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. Set `$ACC_CLAUDE_BIN` to point at a specific binary.
+Sessions use the PATH from your login shell (`$SHELL -l`, or zsh, else bash, else sh when `$SHELL` is not set), read once when the first session starts. That can take up to 3 seconds. After it come the folders of the app's own PATH that it lacks, then the folder of the `claude` that was found. A PATH set only in `~/.zshrc`, typical for nvm, is not seen when the app is opened from Finder, so put it in `~/.zprofile`. On Linux the same goes for `~/.bashrc` when the app is opened from the desktop: put it in `~/.profile`. If the login shell fails, takes longer, or prints no absolute folder, `accd.log` says why, and sessions get the app's PATH with `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and the folder of `claude` added. The app finds `claude` on that PATH, or in `~/.local/bin`, `~/.claude/local`, `~/.npm-global/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`. Set `$ACC_CLAUDE_BIN` to point at a specific binary.
 
 ## Safety model
 
@@ -50,7 +50,7 @@ Rules for runners name what they run: `npx vitest`, `uv run pytest`, `python3 -m
 - anything in or through `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker` or `.claude`, and the files `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc` and `.mcp.json`;
 - anything in `.config/gh` or `.config/gcloud`.
 
-**Editing rules by hand.** Rules cannot be edited in the app yet. They live in `acc.db`, table `rules`, and `accd` reads them on every request, so a change applies at once. To list them with their project names:
+**Editing rules by hand.** Rules cannot be edited in the app yet. They live in `acc.db` in the [data directory](#data-and-privacy), table `rules`, and `accd` reads them on every request, so a change applies at once. To list them with their project names (on Linux the file is `~/.local/share/AgentControlCenter/acc.db`):
 
 ```
 sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db <<'SQL'
@@ -69,8 +69,8 @@ sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db "DELETE FROM ru
 
 | Key | Action |
 |-----|--------|
-| `Cmd+K` | Open the command palette |
-| `Cmd+J` | Jump to the next session that needs you |
+| `Cmd+K` (`Ctrl+K` on Linux) | Open the command palette |
+| `Cmd+J` (macOS only) | Jump to the next session that needs you |
 | `n` | New session |
 | `g` then `o` | Go to Overview |
 | `g` then `s` | Go to Sessions |
@@ -78,13 +78,18 @@ sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db "DELETE FROM ru
 | `g` then `p` | Go to Projects |
 | `g` then `a` | Go to Activity |
 
-Plain keys do not fire while you type in an input, the terminal or a dialog.
+Plain keys do not fire while you type in an input, the terminal or a dialog. Linux has no key for the jump, because `Ctrl+J` is a newline in the session's terminal: click the "needs you" button in the title bar instead.
 
 ## Data and privacy
 
 Everything stays on your machine. The app has no telemetry, no accounts and makes no network calls of its own. Claude Code itself talks to Anthropic as usual.
 
-Data lives in `~/Library/Application Support/AgentControlCenter`, or `$ACC_DATA_DIR` if set:
+Data lives in `$ACC_DATA_DIR` if set, else:
+
+- macOS: `~/Library/Application Support/AgentControlCenter`;
+- Linux: `~/.local/share/AgentControlCenter` (`$XDG_DATA_HOME/AgentControlCenter` if `XDG_DATA_HOME` is set).
+
+It holds:
 
 - `accd.sock`: the Unix socket, mode 0600. The only way in.
 - `accd.lock`: keeps one daemon per data dir.
@@ -105,7 +110,7 @@ pkill accd
 ## Known limitations
 
 - Unsigned builds. See the README for how to open them.
-- The PATH for sessions comes from your login shell, read once at the first session, followed by the app's own PATH. A PATH set only in `~/.zshrc` is not seen when the app is opened from Finder: use `~/.zprofile`. Changes need a daemon restart (`pkill accd`).
+- The PATH for sessions comes from your login shell, read once at the first session, followed by the app's own PATH. A PATH set only in `~/.zshrc` is not seen when the app is opened from Finder: use `~/.zprofile`. On Linux, one set only in `~/.bashrc` is not seen when the app is opened from the desktop: use `~/.profile`. Changes need a daemon restart (`pkill accd`).
 - Claude Code is the only agent.
 - Terminal scrollback is kept in memory, 1 MiB per session. It is lost when the daemon restarts.
 - Sessions die with the daemon. After a restart they show as Stopped, and `Restart` resumes the same Claude conversation (`--resume`).
@@ -122,4 +127,4 @@ pkill accd
   - code run from files in the worktree: git hooks through `core.hooksPath` or husky, `npm install` lifecycle scripts, `git clone --template`, and `npm run` or `make` targets.
 - Worktrees and their `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
 - A worktree starts from the repo's `HEAD`, so uncommitted changes in your checkout are not in it.
-- Local only: one machine, no remote hosts. macOS only.
+- Local only: one machine, no remote hosts. macOS and Linux (x86_64) only, no Windows yet.
