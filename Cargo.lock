@@ -65,6 +65,7 @@ name = "agent-control-center"
 version = "0.2.0"
 dependencies = [
  "acc-protocol",
+ "acc-transport",
  "anyhow",
  "libc",
  "serde",
@@ -74,6 +75,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

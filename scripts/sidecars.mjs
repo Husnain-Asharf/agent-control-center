@@ -1,6 +1,7 @@
 // Builds accd and acc-hook in release mode and copies them to
-// src-tauri/binaries/<name>-<target-triple>, where Tauri's externalBin expects them.
-// Target triple: --target <triple>, else TAURI_ENV_TARGET_TRIPLE, else the rustc host.
+// src-tauri/binaries/<name>-<target-triple>, where Tauri's externalBin expects them
+// (with .exe on Windows). Target triple: --target <triple>, else
+// TAURI_ENV_TARGET_TRIPLE, else the rustc host.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -26,8 +27,10 @@ function targetTriple() {
 const triple = targetTriple();
 const explicit = process.argv.includes('--target') || Boolean(process.env.TAURI_ENV_TARGET_TRIPLE);
 const bins = ['accd', 'acc-hook'];
+const exe = triple.includes('-windows-') ? '.exe' : '';
 
-const args = ['build', '--release', '-p', 'accd', '-p', 'acc-hook'];
+// Only these two: the accd package also has the stand-in its tests use.
+const args = ['build', '--release', '-p', 'accd', '-p', 'acc-hook', '--bin', 'accd', '--bin', 'acc-hook'];
 if (explicit) args.push('--target', triple);
 console.log(`cargo ${args.join(' ')}`);
 execFileSync('cargo', args, { cwd: root, stdio: 'inherit' });
@@ -36,7 +39,7 @@ const outDir = join(root, 'target', ...(explicit ? [triple] : []), 'release');
 const dest = join(root, 'src-tauri', 'binaries');
 mkdirSync(dest, { recursive: true });
 for (const bin of bins) {
-  const to = join(dest, `${bin}-${triple}`);
-  copyFileSync(join(outDir, bin), to);
-  console.log(`copied ${bin} -> ${to}`);
+  const to = join(dest, `${bin}-${triple}${exe}`);
+  copyFileSync(join(outDir, `${bin}${exe}`), to);
+  console.log(`copied ${bin}${exe} -> ${to}`);
 }

@@ -7,6 +7,7 @@
 //! every second.
 
 use acc_protocol::{encode_line, socket_path, ClientKind, Request, RequestEnvelope, PROTOCOL_VERSION};
+use acc_transport::ClientStream;
 use anyhow::{anyhow, bail, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,17 +15,13 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Runtime, State};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout, Instant};
 
@@ -33,6 +30,10 @@ const START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_FILE: &str = "accd.log";
+
+/// The lines from accd, and the side that writes to it.
+type Reader = Lines<BufReader<ReadHalf<ClientStream>>>;
+type Writer = WriteHalf<ClientStream>;
 
 /// Tauri command: sends one request to accd and resolves with its `result`.
 /// Rejects with the JSON string `{"code","message"}`.
@@ -178,8 +179,8 @@ impl Bridge {
 
     /// Serves one connection until it ends. An error means it never got
     /// connected (hello failed); how a connection ended is only logged.
-    async fn serve(&self, stream: UnixStream, frontend: &impl Frontend) -> anyhow::Result<()> {
-        let (reader, mut writer) = stream.into_split();
+    async fn serve(&self, stream: ClientStream, frontend: &impl Frontend) -> anyhow::Result<()> {
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = BufReader::new(reader).lines();
         timeout(HELLO_TIMEOUT, hello(self.next_id(), &mut lines, &mut writer, frontend))
             .await
@@ -242,12 +243,7 @@ impl Bridge {
 
 /// Says hello, which subscribes this connection to every daemon event, and waits for the reply.
 /// Events that arrive before it are passed on.
-async fn hello(
-    id: u64,
-    lines: &mut Lines<BufReader<OwnedReadHalf>>,
-    writer: &mut OwnedWriteHalf,
-    frontend: &impl Frontend,
-) -> anyhow::Result<()> {
+async fn hello(id: u64, lines: &mut Reader, writer: &mut Writer, frontend: &impl Frontend) -> anyhow::Result<()> {
     let hello = RequestEnvelope { id, request: Request::Hello { client: ClientKind::App, version: PROTOCOL_VERSION } };
     writer.write_all(&encode_line(&hello)).await.context("sending hello to accd")?;
     loop {
@@ -268,24 +264,25 @@ async fn hello(
 }
 
 /// Writes queued request lines until the link is dropped or a write fails.
-async fn write_lines(mut writer: OwnedWriteHalf, mut queued: mpsc::UnboundedReceiver<String>) -> std::io::Result<()> {
+async fn write_lines(mut writer: Writer, mut queued: mpsc::UnboundedReceiver<String>) -> std::io::Result<()> {
     while let Some(line) = queued.recv().await {
         writer.write_all(line.as_bytes()).await?;
     }
     Ok(())
 }
 
-/// Connects to the accd serving `data_dir`. When nothing answers on its socket it
-/// starts `accd`, unless the accd in `started` (from an earlier attempt) still
-/// runs: a slow or hung accd is waited for, never given a sibling. Then it polls
-/// the socket every 100 ms for up to 5 s, and fails at once if that accd exits.
+/// Connects to the accd serving `data_dir`. When nothing answers on its socket
+/// (its named pipe on Windows) it starts `accd`, unless the accd in `started`
+/// (from an earlier attempt) still runs: a slow or hung accd is waited for,
+/// never given a sibling. Then it polls the socket every 100 ms for up to 5 s,
+/// and fails at once if that accd exits.
 pub async fn ensure_daemon(
     accd: &Path,
     data_dir: &Path,
     started: &mut Option<StartedAccd>,
-) -> anyhow::Result<UnixStream> {
+) -> anyhow::Result<ClientStream> {
     let socket = socket_path(data_dir);
-    if let Ok(stream) = UnixStream::connect(&socket).await {
+    if let Ok(stream) = acc_transport::connect(&socket).await {
         return Ok(stream);
     }
     if started.as_ref().is_none_or(|earlier| earlier.ended().is_some()) {
@@ -298,7 +295,7 @@ pub async fn ensure_daemon(
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         sleep(START_POLL_INTERVAL).await;
-        if let Ok(stream) = UnixStream::connect(&socket).await {
+        if let Ok(stream) = acc_transport::connect(&socket).await {
             return Ok(stream);
         }
         if let Some(how) = waiting_for.ended() {
@@ -330,38 +327,28 @@ impl StartedAccd {
     }
 }
 
-/// Starts accd detached in its own session, with stdin from /dev/null and stdout
-/// and stderr appended to `<data dir>/accd.log`, so it outlives the app and never
-/// writes to a closed terminal. It blocks (fork and exec), so async code runs it
-/// with `spawn_blocking`.
+/// Starts accd detached, with stdin from the null device and stdout and
+/// stderr appended to `<data dir>/accd.log`, so it outlives the app and never
+/// writes to a closed terminal. It blocks (fork and exec), so async code runs
+/// it with `spawn_blocking`.
 fn start_accd(accd: &Path, data_dir: &Path) -> anyhow::Result<StartedAccd> {
-    let executable = std::fs::metadata(accd).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-    if !executable {
+    if !is_executable(accd) {
         bail!("accd was not found at {}. Run cargo build --workspace.", accd.display());
     }
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(data_dir)
-        .with_context(|| format!("creating {}", data_dir.display()))?;
+    let mut dir = DirBuilder::new();
+    dir.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+    dir.create(data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     let log_path = data_dir.join(LOG_FILE);
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log_path)
-        .with_context(|| format!("opening {}", log_path.display()))?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let log_file = options.open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
     let mut command = Command::new(accd);
     command.arg("--data-dir").arg(data_dir).stdin(Stdio::null()).stdout(log_file.try_clone()?).stderr(log_file);
-    // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    detach(&mut command);
     let mut child = command.spawn().with_context(|| format!("starting {}", accd.display()))?;
     let pid = child.id();
     let ended = Arc::new(OnceLock::new());
@@ -379,15 +366,56 @@ fn start_accd(accd: &Path, data_dir: &Path) -> anyhow::Result<StartedAccd> {
     Ok(StartedAccd { ended })
 }
 
+/// Whether `accd` is a file with an execute bit.
+#[cfg(unix)]
+fn is_executable(accd: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(accd).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `accd` is a file. On Windows it is `accd.exe`, which can start.
+#[cfg(windows)]
+fn is_executable(accd: &Path) -> bool {
+    accd.is_file()
+}
+
+/// Puts accd in a session of its own (setsid), away from the app's terminal.
+#[cfg(unix)]
+fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Gives accd a console of its own with no window, so no window opens for it
+/// or for the programs it runs, in a process group of its own, so a Ctrl+C in
+/// the terminal the app was started from does not reach it.
+#[cfg(windows)]
+fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+}
+
 /// The accd next to the app's executable, else the workspace build used during development.
 /// Every bundle puts it there: `Contents/MacOS` in the macOS app, `/usr/bin` from the .deb
-/// and the .rpm, and `usr/bin` in the mounted AppImage, which is where the executable runs from.
+/// and the .rpm, `usr/bin` in the mounted AppImage, which is where the executable runs from,
+/// and the install folder on Windows.
 pub fn accd_path() -> PathBuf {
+    let name = format!("accd{}", std::env::consts::EXE_SUFFIX);
     std::env::current_exe()
         .ok()
-        .map(|exe| exe.with_file_name("accd"))
+        .map(|exe| exe.with_file_name(&name))
         .filter(|sibling| sibling.exists())
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/accd"))
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug").join(&name))
 }
 
 /// A line on the app's stderr. The app ignores a failed write instead of
@@ -418,9 +446,8 @@ pub fn request_line(id: u64, method: &str, params: Option<&Value>) -> String {
 mod tests {
     use super::*;
     use acc_protocol::{ServerMsg, Snapshot};
+    use acc_transport::{Listener, ServerStream};
     use serde_json::json;
-    use std::os::unix::fs::PermissionsExt;
-    use tokio::net::UnixListener;
     use tokio::task::JoinHandle;
 
     /// Upper bound for anything a test waits on. Generous, because process starts
@@ -498,19 +525,19 @@ mod tests {
 
     /// The daemon's side of an app connection.
     struct Peer {
-        lines: Lines<BufReader<OwnedReadHalf>>,
-        writer: OwnedWriteHalf,
+        lines: Lines<BufReader<ReadHalf<ServerStream>>>,
+        writer: WriteHalf<ServerStream>,
     }
 
     impl Peer {
-        async fn accept(listener: &UnixListener) -> Peer {
-            let (stream, _) = timeout(WAIT, listener.accept()).await.expect("the bridge connects").unwrap();
-            let (reader, writer) = stream.into_split();
+        async fn accept(listener: &mut Listener) -> Peer {
+            let stream = timeout(WAIT, listener.accept()).await.expect("the bridge connects").unwrap();
+            let (reader, writer) = tokio::io::split(stream);
             Peer { lines: BufReader::new(reader).lines(), writer }
         }
 
         /// Accepts a connection and answers its hello, as accd does.
-        async fn accept_app(listener: &UnixListener) -> Peer {
+        async fn accept_app(listener: &mut Listener) -> Peer {
             let mut peer = Peer::accept(listener).await;
             let hello = peer.recv().await;
             assert_eq!(hello.request, Request::Hello { client: ClientKind::App, version: 1 });
@@ -529,14 +556,23 @@ mod tests {
         }
     }
 
-    /// A shell script standing in for accd. It has run once already, with
-    /// `WARM_UP` set so it exits at once: Linux does not start a file that is
-    /// open for writing (ETXTBSY), and a process another test forks while the
-    /// script is written keeps it open until that process execs.
-    fn fake_accd(dir: &Path, script: &str) -> PathBuf {
-        let path = dir.join("fake-accd");
-        std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    /// The daemon's listener for `data_dir`, played by the test.
+    fn listen(data_dir: &Path) -> Listener {
+        Listener::bind(&socket_path(data_dir)).unwrap()
+    }
+
+    /// The workspace's test stand-in (crates/accd/tests/fixtures/stand-in.rs)
+    /// as accd, under `name`, which picks what it does: `accd-sleeps` prints
+    /// its arguments and pid and runs for 30 s, `accd-prints` prints a line to
+    /// stdout and one to stderr, `accd-exits` exits with 3 after half a
+    /// second. It has run once already, with `WARM_UP` set so it exits at
+    /// once: Linux does not start a file that is open for writing (ETXTBSY),
+    /// and a process another test forks while the file is written keeps it
+    /// open until that process execs. `cargo build -p accd` builds it.
+    fn fake_accd(dir: &Path, name: &str) -> PathBuf {
+        let suffix = std::env::consts::EXE_SUFFIX;
+        let path = dir.join(format!("{name}{suffix}"));
+        std::fs::copy(accd_path().with_file_name(format!("stand-in{suffix}")), &path).expect("the stand-in next to accd");
         let deadline = std::time::Instant::now() + WAIT;
         loop {
             match Command::new(&path).env("WARM_UP", "1").status() {
@@ -551,24 +587,62 @@ mod tests {
 
     /// An accd (or stand-in) a test started, by pid. Dropping it stops the process,
     /// so a failed test leaves none behind.
-    struct TestAccd(libc::pid_t);
+    struct TestAccd(u32);
 
+    #[cfg(unix)]
     impl TestAccd {
         fn is_running(&self) -> bool {
-            unsafe { libc::kill(self.0, 0) == 0 }
+            unsafe { libc::kill(self.0 as libc::pid_t, 0) == 0 }
         }
-    }
 
-    impl Drop for TestAccd {
-        fn drop(&mut self) {
-            unsafe { libc::kill(self.0, libc::SIGTERM) };
+        fn stop(&self) {
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGTERM) };
             let deadline = std::time::Instant::now() + WAIT;
             while self.is_running() && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
             }
             if self.is_running() {
-                unsafe { libc::kill(self.0, libc::SIGKILL) };
+                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
             }
+        }
+    }
+
+    #[cfg(windows)]
+    impl TestAccd {
+        fn is_running(&self) -> bool {
+            use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+            use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+            // SAFETY: plain calls on a handle opened and closed here.
+            unsafe {
+                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, self.0);
+                if process.is_null() {
+                    return false;
+                }
+                let mut code = 0;
+                let running = GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32;
+                CloseHandle(process);
+                running
+            }
+        }
+
+        fn stop(&self) {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+            // SAFETY: plain calls on a handle opened and closed here.
+            unsafe {
+                let process = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, self.0);
+                if !process.is_null() {
+                    TerminateProcess(process, 1);
+                    WaitForSingleObject(process, WAIT.as_millis() as u32);
+                    CloseHandle(process);
+                }
+            }
+        }
+    }
+
+    impl Drop for TestAccd {
+        fn drop(&mut self) {
+            self.stop();
         }
     }
 
@@ -618,9 +692,9 @@ mod tests {
     #[tokio::test]
     async fn connected_only_after_hello_is_answered() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
+        let mut listener = listen(dir.path());
         let mut app = Running::start(dir.path().join("no-accd"), dir.path());
-        let mut peer = Peer::accept(&listener).await;
+        let mut peer = Peer::accept(&mut listener).await;
         let hello = peer.recv().await;
         assert_eq!(hello.request, Request::Hello { client: ClientKind::App, version: 1 });
         sleep(Duration::from_millis(100)).await;
@@ -635,9 +709,9 @@ mod tests {
     #[tokio::test]
     async fn replies_match_requests_by_id() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
+        let mut listener = listen(dir.path());
         let mut app = Running::start(dir.path().join("no-accd"), dir.path());
-        let mut peer = Peer::accept_app(&listener).await;
+        let mut peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
 
         let first = app.request("snapshot", None);
@@ -658,9 +732,9 @@ mod tests {
     #[tokio::test]
     async fn daemon_errors_keep_their_code() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
+        let mut listener = listen(dir.path());
         let mut app = Running::start(dir.path().join("no-accd"), dir.path());
-        let mut peer = Peer::accept_app(&listener).await;
+        let mut peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
 
         let add = app.request("project_add", Some(json!({"path": "/tmp/plain dir"})));
@@ -677,9 +751,9 @@ mod tests {
     #[tokio::test]
     async fn daemon_events_reach_the_frontend_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
+        let mut listener = listen(dir.path());
         let mut app = Running::start(dir.path().join("no-accd"), dir.path());
-        let mut peer = Peer::accept_app(&listener).await;
+        let mut peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
 
         // A field this build's protocol does not have, and a kind it does not know.
@@ -694,9 +768,9 @@ mod tests {
     #[tokio::test]
     async fn losing_the_daemon_rejects_pending_requests() {
         let dir = tempfile::tempdir().unwrap();
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
+        let mut listener = listen(dir.path());
         let mut app = Running::start(dir.path().join("no-accd"), dir.path());
-        let mut peer = Peer::accept_app(&listener).await;
+        let mut peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
 
         let pending = app.request("snapshot", None);
@@ -720,8 +794,8 @@ mod tests {
         assert_eq!(app.notice().await, Notice::Status(json!({"connected": false, "error": missing})));
 
         // Once a daemon answers, the error is gone.
-        let listener = UnixListener::bind(socket_path(dir.path())).unwrap();
-        let peer = Peer::accept_app(&listener).await;
+        let mut listener = listen(dir.path());
+        let peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
         drop(peer);
         assert_eq!(app.notice().await, disconnected_notice());
@@ -740,17 +814,17 @@ mod tests {
     #[tokio::test]
     async fn reconnect_starts_accd_again() {
         let dir = tempfile::tempdir().unwrap();
-        let socket = socket_path(dir.path());
-        let accd = fake_accd(dir.path(), "echo \"pid: $$\"\nexec sleep 30");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let accd = fake_accd(dir.path(), "accd-sleeps");
+        let mut listener = listen(dir.path());
         let mut app = Running::start(accd, dir.path());
-        let peer = Peer::accept_app(&listener).await;
+        let peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
         assert!(!dir.path().join("accd.log").exists(), "accd was answering, so none was started");
 
-        // accd dies, and its socket goes with it.
+        // accd dies, and its socket goes with it (a named pipe goes by itself).
         drop(listener);
-        std::fs::remove_file(&socket).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(socket_path(dir.path())).unwrap();
         drop(peer);
         assert_eq!(app.notice().await, disconnected_notice());
         let lost = Instant::now();
@@ -759,31 +833,38 @@ mod tests {
         assert_eq!(restarted.len(), 1);
 
         // The restarted accd listens; the test plays its socket.
-        let listener = UnixListener::bind(&socket).unwrap();
-        let _peer = Peer::accept_app(&listener).await;
+        let mut listener = listen(dir.path());
+        let _peer = Peer::accept_app(&mut listener).await;
         assert_eq!(app.notice().await, connected());
     }
 
     #[tokio::test]
-    async fn accd_starts_in_its_own_session_with_the_data_dir() {
+    async fn accd_starts_detached_with_the_data_dir() {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("data dir");
-        let accd = fake_accd(dir.path(), "echo \"args: $# $*\"\necho \"pid: $$\"\nexec sleep 30");
+        let accd = fake_accd(dir.path(), "accd-sleeps");
         start_accd(&accd, &data_dir).unwrap();
-        let log = wait_for_log(&data_dir, "pid: ", 1).await;
+        let log = wait_for_log(&data_dir, "console window: ", 1).await;
         let accds = logged_accds(&log);
-        let pid = accds[0].0;
         assert!(log.contains(&format!("args: 2 --data-dir {}\n", data_dir.display())), "{log}");
-        assert_eq!(unsafe { libc::getsid(pid) }, pid, "accd leads its own session");
-        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&data_dir), 0o700);
-        assert_eq!(mode(&data_dir.join("accd.log")), 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let pid = accds[0].0 as libc::pid_t;
+            assert_eq!(unsafe { libc::getsid(pid) }, pid, "accd leads its own session");
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&data_dir), 0o700);
+            assert_eq!(mode(&data_dir.join("accd.log")), 0o600);
+        }
+        // On Windows it has a console of its own, with no window.
+        assert!(log.contains("console window: none\n"), "{log}");
+        assert_eq!(accds.len(), 1);
     }
 
     #[tokio::test]
     async fn accd_output_is_appended_to_its_log() {
         let dir = tempfile::tempdir().unwrap();
-        let accd = fake_accd(dir.path(), "echo to stdout\necho to stderr >&2");
+        let accd = fake_accd(dir.path(), "accd-prints");
         start_accd(&accd, dir.path()).unwrap();
         wait_for_log(dir.path(), "to stderr", 1).await;
         start_accd(&accd, dir.path()).unwrap();
@@ -794,7 +875,7 @@ mod tests {
     #[tokio::test]
     async fn a_running_accd_gets_no_sibling() {
         let dir = tempfile::tempdir().unwrap();
-        let accd = fake_accd(dir.path(), "echo \"pid: $$\"\nexec sleep 30");
+        let accd = fake_accd(dir.path(), "accd-sleeps");
         let mut started = None;
         let first = ensure_daemon(&accd, dir.path(), &mut started).await.unwrap_err();
         assert!(first.to_string().contains("did not listen"), "{first:#}");
@@ -812,13 +893,14 @@ mod tests {
     #[tokio::test]
     async fn an_accd_that_exits_fails_the_attempt_at_once() {
         let dir = tempfile::tempdir().unwrap();
-        let accd = fake_accd(dir.path(), "echo started\nsleep 0.5\nexit 3");
+        let accd = fake_accd(dir.path(), "accd-exits");
         // An earlier attempt started this accd. Starting it is not timed: starting a
         // process has been seen to stall for over 2 s on a busy Mac.
         let mut started = Some(start_accd(&accd, dir.path()).unwrap());
         let began = Instant::now();
         let err = ensure_daemon(&accd, dir.path(), &mut started).await.unwrap_err();
-        assert!(err.to_string().contains("exit status: 3"), "{err:#}");
+        let exited = if cfg!(windows) { "exit code: 3" } else { "exit status: 3" };
+        assert!(err.to_string().contains(exited), "{err:#}");
         assert!(began.elapsed() < Duration::from_secs(4), "no 5 s wait once that accd is gone");
 
         // It is gone, so the next attempt starts a new one.
@@ -834,7 +916,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let accd = accd_path();
         let probe = ensure_daemon(&accd, dir.path(), &mut None).await.expect("accd listens on its socket");
-        let started = TestAccd(probe.peer_cred().unwrap().pid().expect("the pid of accd"));
+        let started = TestAccd(acc_transport::server_pid(&probe).expect("the pid of accd"));
         drop(probe);
 
         let mut app = Running::start(accd, dir.path());
@@ -844,9 +926,8 @@ mod tests {
         assert_eq!(snapshot, Snapshot { projects: vec![], sessions: vec![], approvals: vec![] });
 
         drop(app);
-        assert!(UnixStream::connect(socket_path(dir.path())).await.is_ok(), "accd keeps running without the app");
-        let pid = started.0;
-        drop(started);
-        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "accd has stopped");
+        assert!(acc_transport::connect(&socket_path(dir.path())).await.is_ok(), "accd keeps running without the app");
+        started.stop();
+        assert!(!started.is_running(), "accd has stopped");
     }
 }
