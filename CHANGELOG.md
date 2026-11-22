@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-23
+
+Windows support.
+
+### Added
+
+- Windows (x64) builds: an `.msi` and an NSIS `-setup.exe` in each release,
+  next to the macOS and Linux files. They need Windows 10 or 11, Git for
+  Windows, and Claude Code 2.1.139 or later. The data directory on Windows is
+  `%LOCALAPPDATA%\AgentControlCenter`.
+- On Windows the daemon listens on a named pipe that only your user can open,
+  sessions run on ConPTY, and Stop ends every process a session started.
+- `claude` is found on Windows as `claude.exe`, `claude.cmd` or `claude.bat` on
+  the PATH, then in `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`. A
+  `claude.cmd` runs through `cmd.exe`, which passes the task on unchanged,
+  except that a line break becomes a space.
+- On Windows the Always allow checks also know `cmd`, `powershell`, `pwsh`,
+  `wsl`, `start` and `runas` as wrappers, `py` as python and `git.exe` as git,
+  and protected paths match with backslashes.
+- CI runs the tests on Windows as well as macOS and Ubuntu 22.04.
+
+### Changed
+
+- A request from PowerShell, the shell tool Claude Code also has on Windows,
+  shows its command. Always allow allows it once and adds no rule.
+- The tests use a small stand-in program for Claude Code instead of shell
+  scripts, so they run the same on every platform.
+- The shortcut hints show `Ctrl+K` on Windows, as on Linux.
+
+### Known limitations
+
+- Windows builds are new and less tested than the others. Please report what
+  does not work.
+- Windows builds are x64 only, and unsigned: SmartScreen warns before the
+  first run.
+- On Windows, Always allow never covers a shell command with an absolute path,
+  so such commands ask each time.
+- On Windows, Stop ends a session at once, without a hangup signal first.
+- Windows has no key for "next that needs you", as on Linux.
+
 ## [0.2.0] - 2026-11-22
 
 Linux support.
@@ -72,5 +112,6 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.3.0]: ../../releases/tag/v0.3.0
 [0.2.0]: ../../releases/tag/v0.2.0
 [0.1.0]: ../../releases/tag/v0.1.0
