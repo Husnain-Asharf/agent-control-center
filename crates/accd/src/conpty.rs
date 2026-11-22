@@ -204,23 +204,23 @@ mod tests {
 
     #[test]
     fn batch_arguments_are_quoted_for_cmd() {
-        let line = |args: &[&str]| {
-            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            batch_command_line(Path::new(r"C:\Users\x y\AppData\Roaming\npm\claude.cmd"), &args)
-        };
+        let program = Path::new(r"C:\Users\x y\AppData\Roaming\npm\claude.cmd");
+        let line = |args: &[&str]| batch_command_line(program, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
         assert_eq!(
             line(&["--settings", r"C:\Users\x y\data\claude-settings.json", "Fix it"]),
             r#""C:\Users\x y\AppData\Roaming\npm\claude.cmd" "--settings" "C:\Users\x y\data\claude-settings.json" "Fix it""#
         );
+        // One argument as it is quoted, after the program.
+        let quoted = |arg: &str| line(&[arg]).strip_prefix(r#""C:\Users\x y\AppData\Roaming\npm\claude.cmd" "#).unwrap().to_string();
         // cmd's own characters stay inside the quotes; quotes are doubled.
-        assert_eq!(line(&["a & b | c > d ^ e %PATH% !x! (y)"]).split_once(' ').unwrap().1, r#""a & b | c > d ^ e %PATH% !x! (y)""#);
-        assert_eq!(line(&[r#"say "hi""#]).split_once(' ').unwrap().1, r#""say ""hi""""#);
+        assert_eq!(quoted("a & b | c > d ^ e %PATH% !x! (y)"), r#""a & b | c > d ^ e %PATH% !x! (y)""#);
+        assert_eq!(quoted(r#"say "hi""#), r#""say ""hi""""#);
         // Backslashes before a quote, or at the end, are doubled; others stay.
-        assert_eq!(line(&[r#"a\"b"#]).split_once(' ').unwrap().1, r#""a\\""b""#);
-        assert_eq!(line(&[r"C:\dir\"]).split_once(' ').unwrap().1, r#""C:\dir\\""#);
-        assert_eq!(line(&[""]).split_once(' ').unwrap().1, r#""""#);
+        assert_eq!(quoted(r#"a\"b"#), r#""a\\""b""#);
+        assert_eq!(quoted(r"C:\dir\"), r#""C:\dir\\""#);
+        assert_eq!(quoted(""), r#""""#);
         // Line breaks become spaces.
-        assert_eq!(line(&["one\r\ntwo\nthree"]).split_once(' ').unwrap().1, r#""one  two three""#);
+        assert_eq!(quoted("one\r\ntwo\nthree"), r#""one  two three""#);
     }
 
     #[test]
