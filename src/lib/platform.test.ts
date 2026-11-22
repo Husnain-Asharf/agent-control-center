@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isMacUserAgent, keyHints } from './platform';
+import { isMacUserAgent, isWindowsUserAgent, keyHints, platformOf } from './platform';
 import { matchShortcut } from './keys';
 
 const MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
@@ -18,12 +18,32 @@ describe('isMacUserAgent', () => {
   });
 });
 
+describe('isWindowsUserAgent', () => {
+  it('is true for the Windows webview', () => {
+    expect(isWindowsUserAgent(WINDOWS)).toBe(true);
+  });
+  it('is false for the macOS and Linux webviews', () => {
+    expect(isWindowsUserAgent(MAC)).toBe(false);
+    expect(isWindowsUserAgent(LINUX)).toBe(false);
+    expect(isWindowsUserAgent('')).toBe(false);
+  });
+});
+
+describe('platformOf', () => {
+  it('names the platform of each webview', () => {
+    expect(platformOf(MAC)).toBe('mac');
+    expect(platformOf(WINDOWS)).toBe('windows');
+    expect(platformOf(LINUX)).toBe('linux');
+  });
+});
+
 describe('keyHints', () => {
   it('shows the Cmd keys on macOS', () => {
-    expect(keyHints(true)).toEqual({ palette: '⌘K', nextNeeds: '⌘J' });
+    expect(keyHints('mac')).toEqual({ palette: '⌘K', nextNeeds: '⌘J' });
   });
-  it('shows Ctrl+K elsewhere, and no key for the jump', () => {
-    expect(keyHints(false)).toEqual({ palette: 'Ctrl+K', nextNeeds: null });
+  it('shows Ctrl+K on Windows and Linux, and no key for the jump', () => {
+    expect(keyHints('windows')).toEqual({ palette: 'Ctrl+K', nextNeeds: null });
+    expect(keyHints('linux')).toEqual({ palette: 'Ctrl+K', nextNeeds: null });
   });
   it('names keys that work', () => {
     const press = (key: string, mods: { metaKey?: boolean; ctrlKey?: boolean }) => ({

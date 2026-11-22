@@ -2,10 +2,10 @@ import { needsYouCount, useStore } from '../store/store';
 import { go } from '../lib/route';
 import { jumpToOldest } from '../lib/approvals';
 import { openPalette } from '../lib/palette';
-import { isMac, keyHints } from '../lib/platform';
+import { isMac, keyHints, platform } from '../lib/platform';
 import { Icon } from './Icon';
 
-/** On macOS the native traffic lights sit in the first 80px. On Linux the native title bar is above the webview. */
+/** On macOS the native traffic lights sit in the first 80px. On Windows and Linux the native title bar is above the webview. */
 const TRAFFIC_LIGHTS_INSET = 80;
 
 export function TitleBar() {
@@ -14,7 +14,7 @@ export function TitleBar() {
   const n = useStore((s) => needsYouCount(s));
   const label = n === 0 ? 'Nothing needs you' : n === 1 ? '1 needs you' : `${n} need you`;
   const themeLabel = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
-  const keys = keyHints(isMac);
+  const keys = keyHints(platform);
 
   return (
     <header className="titlebar" data-tauri-drag-region>
