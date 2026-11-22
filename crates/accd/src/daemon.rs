@@ -2513,9 +2513,12 @@ mod tests {
 
     #[test]
     fn commands_no_rule_could_match_get_no_rule() {
-        for command in ["cat /etc/hosts", "ls|wc", "git status; ls", "cat ~/.zshrc", "cat \"unterminated"] {
+        for command in ["cat /etc/hosts", "ls|wc", "git status; ls", "cat \"unterminated"] {
             assert_eq!(command_rule(command), Err(OnceOnly::NotPlain), "{command:?}");
         }
+        // On Windows a `~` can also be part of a short (8.3) name.
+        let tilde = if cfg!(windows) { OnceOnly::WindowsPath } else { OnceOnly::NotPlain };
+        assert_eq!(command_rule("cat ~/.zshrc"), Err(tilde));
         // Only the rule's own words must be plain.
         assert_eq!(command_rule("npm install x && npm test"), Ok(bash_rule("npm install")));
     }
