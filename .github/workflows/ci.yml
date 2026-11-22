@@ -63,7 +63,9 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sidecars.outcome == 'success' }}
         run: cargo test --workspace --no-fail-fast -- --quiet 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
       # One annotation per failed check, with the last 120 lines of its log, so
-      # a failure can be read from the check run's annotations.
+      # a failure can be read from the check run's annotations. GitHub keeps
+      # the first 4096 characters of an annotation, so at most the last 4000
+      # characters of those lines are sent.
       - name: Report failures
         if: failure()
         env:
@@ -77,9 +79,13 @@ jobs:
             if [ "$outcome" != failure ] || [ ! -f "$log" ]; then
               return 0
             fi
-            # Without color codes, and with %, CR and LF encoded, so all the
-            # lines arrive as one multi-line annotation.
-            text=$(tail -n 120 "$log" | perl -0777 -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\n+\z//; s/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+            # Without color codes, cut to whole lines in the last 4000
+            # characters, and with %, CR and LF encoded, so all the lines
+            # arrive as one multi-line annotation.
+            text=$(tail -n 120 "$log" | perl -0777 -ne '
+              s/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\n+\z//;
+              if (length > 4000) { $_ = substr($_, -4000); s/\A[^\n]*\n//; }
+              s/%/%25/g; s/\r/%0D/g; s/\n/%0A/g; print')
             echo "::error title=$step output::$text"
           }
           report "$NPM_TEST" "npm test" "$RUNNER_TEMP/npm-test.log"
