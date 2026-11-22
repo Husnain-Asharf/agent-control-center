@@ -10,7 +10,8 @@
 //! - `flood-claude`: prints `line 1` to `line 2000`, then runs for 300 s.
 //! - `stream-claude`: prints `line 1` to `line 20000` and `END`, then runs for 300 s.
 //! - `acc-hook`: exits at once.
-//! - `accd-sleeps`: prints its arguments and pid, then runs for 30 s.
+//! - `accd-sleeps`: prints its arguments, its pid and whether it has a
+//!   console window, then runs for 30 s.
 //! - `accd-prints`: prints a line to stdout and one to stderr, then exits.
 //! - `accd-exits`: prints `started` and exits with 3 after half a second.
 //!
