@@ -4,14 +4,14 @@ import { Icon } from '../components/Icon';
 import { Lamp } from '../components/Lamp';
 import { openNewSession } from '../dialogs/NewSessionDialog';
 import { fmtDur } from '../lib/format';
-import { decide, isProtectedApproval } from '../lib/approvals';
+import { decide, isProtectedApproval, wantsVerb } from '../lib/approvals';
 import { segmentsFor } from '../lib/segments';
 import { useStore } from '../store/store';
 
 const HOUR = 3_600_000;
 
 type Item =
-  | { kind: 'approval'; id: string; at: number; sessionId: string; summary: string; protected: boolean }
+  | { kind: 'approval'; id: string; at: number; sessionId: string; tool: string; summary: string; protected: boolean }
   | { kind: 'failed'; id: string; at: number; sessionId: string };
 
 export function Overview() {
@@ -27,7 +27,7 @@ export function Overview() {
     const out: Item[] = [
       ...Object.values(approvals)
         .filter((a) => a.state === 'pending')
-        .map((a): Item => ({ kind: 'approval', id: a.id, at: a.created_at, sessionId: a.session_id, summary: a.summary, protected: isProtectedApproval(a) })),
+        .map((a): Item => ({ kind: 'approval', id: a.id, at: a.created_at, sessionId: a.session_id, tool: a.tool, summary: a.summary, protected: isProtectedApproval(a) })),
       ...Object.values(sessions)
         .filter((s) => s.status === 'failed')
         .map((s): Item => ({ kind: 'failed', id: s.id, at: s.status_since, sessionId: s.id })),
@@ -113,7 +113,7 @@ export function Overview() {
                     <span>Claude Code in {w.project}</span>
                   </a>
                   <div className="what">
-                    Asked to run <code>{it.summary}</code>
+                    Asked to {wantsVerb(it.tool)} <code>{it.summary}</code>
                   </div>
                   <div className="wait">{fmtDur(now - it.at)}</div>
                   <div className="row-actions">
