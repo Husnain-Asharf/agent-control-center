@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/logo.png" width="128" alt="Agent Control Center logo"></p>
+
 # Agent Control Center
 
 A free, open-source desktop app to run and supervise AI coding agents like Claude Code on macOS and Linux.
@@ -7,6 +9,8 @@ A free, open-source desktop app to run and supervise AI coding agents like Claud
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB.svg)
 ![Rust](https://img.shields.io/badge/Rust-daemon-orange.svg)
 ![React](https://img.shields.io/badge/React-UI-61DAFB.svg)
+
+![Agent Control Center overview with session timelines for several Claude Code agents](docs/images/overview.png)
 
 ## What it does
 
@@ -22,6 +26,18 @@ Agent Control Center runs several Claude Code sessions in one window. Each sessi
 - An overview of all sessions and an activity log of every approval and event.
 - A command palette (Cmd+K, or Ctrl+K on Linux) and keyboard shortcuts.
 - A soft chime when a session needs you.
+
+## Screenshots
+
+![Agent Control Center session view with a live terminal and a pending approval](docs/images/session.png)
+
+A session with its live terminal, activity log and a permission request waiting.
+
+![Agent Control Center approvals inbox with Allow once, Always allow and Deny](docs/images/approvals.png)
+
+The approvals inbox, with the command the agent wants to run.
+
+Screenshots use demo data.
 
 ## Download and install
 

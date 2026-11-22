@@ -8,6 +8,7 @@ import {
   decisionKeysReady,
   isProtectedApproval,
   wantsText,
+  wantsVerb,
 } from './approvals';
 import { useStore } from '../store/store';
 
@@ -35,6 +36,16 @@ describe('wantsText', () => {
     expect(wantsText('Edit')).toBe('Wants to edit a file');
     expect(wantsText('Write')).toBe('Wants to edit a file');
     expect(wantsText('WebFetch')).toBe('Wants to use WebFetch');
+  });
+});
+
+describe('wantsVerb', () => {
+  it('uses run only for commands', () => {
+    expect(wantsVerb('Bash')).toBe('run');
+    expect(wantsVerb('Edit')).toBe('edit');
+    expect(wantsVerb('MultiEdit')).toBe('edit');
+    expect(wantsVerb('Write')).toBe('edit');
+    expect(wantsVerb('WebFetch')).toBe('use WebFetch');
   });
 });
 
