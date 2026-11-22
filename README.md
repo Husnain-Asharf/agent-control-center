@@ -204,7 +204,7 @@ cargo test --workspace
 
 ## Releasing
 
-Maintainers: bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-14` (the Intel build is cross-compiled) and creates a draft GitHub release. Edit the notes and publish it. The first tagged release is the first real run of the workflow. Before it, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions).
+Maintainers: bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-latest` (the Intel build is cross-compiled) and creates a draft GitHub release. Edit the notes and publish it. The first tagged release is the first real run of the workflow. Before it, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions).
 
 ## Known limitations
 

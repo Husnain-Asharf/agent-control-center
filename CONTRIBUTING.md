@@ -70,7 +70,7 @@ Add a body only when the reason is not clear from the diff.
 
 ## Maintainers
 
-Before the first release, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions). Both macOS builds run on `macos-14`; the Intel build is cross-compiled. The first tagged release is the first real run of the workflow.
+Before the first release, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions). Both macOS builds run on `macos-latest`; the Intel build is cross-compiled. The first tagged release is the first real run of the workflow.
 
 Upload `docs/images/social-preview.png` as the repository social preview (Settings, General, Social preview), and enable private vulnerability reporting (Settings, Code security).
 
