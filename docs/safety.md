@@ -44,7 +44,7 @@ Windows has no login shell. Sessions get the app's PATH, which an app started fr
 - tools with no known input shape, such as MCP tools and WebSearch;
 - PowerShell commands, from the shell tool Claude Code also has on Windows.
 
-On Windows, also `cmd`, `powershell`, `pwsh`, `wsl`, `start` and `runas` count as wrappers, `py` counts as python, and a program name counts without `.exe`, `.com`, `.cmd` or `.bat` (`git.exe push` is a push).
+On Windows, also `cmd`, `powershell`, `pwsh`, `wsl`, `start` and `runas` count as wrappers, `py` counts as python, and a program name counts without `.exe`, `.com`, `.cmd` or `.bat` (`git.exe push` is a push). A path or a shell word that Windows can read as another file, such as the short name `CLAUDE~1`, gets no rule either (see Known limitations).
 
 Rules for runners name what they run: `npx vitest`, `uv run pytest`, `python3 -m pytest`. A WebFetch rule covers one origin.
 
@@ -136,7 +136,12 @@ On Windows: `taskkill /IM accd.exe /F`.
   - external `git-<name>` programs;
   - interpreters and code flags not on the list above, such as `fish -C`;
   - code run from files in the worktree: git hooks through `core.hooksPath` or husky, `npm install` lifecycle scripts, `git clone --template`, and `npm run` or `make` targets.
-- On Windows, Always allow never covers a shell command with an absolute path (`C:\...`, `/c/...`): it asks each time. Credentials that tools keep under `AppData`, such as those of gh and gcloud, are not protected paths there.
+- On Windows, Always allow never covers a shell command with an absolute path or a `:` in a word, such as `C:\x`, `/c/x`, `D:notes` or `host:3000`. It asks each time.
+- On Windows, Always allow never covers a short (8.3) name such as `CLAUDE~1`, a name that ends in a dot or a space, a device name such as `NUL` or `COM1`, a data stream such as `file::$DATA`, or a `\\?\` or `\\.\` prefix. Windows can read these as another file, so they ask each time.
+- On Windows, credentials that tools keep under `AppData`, such as those of gh and gcloud, are not protected paths.
+- Before you upgrade or uninstall on Windows, end the daemon: `taskkill /IM accd.exe /F`. The installer cannot replace files the running daemon uses.
+- If you set `ACC_DATA_DIR` on Windows, point it at a folder only you can open. The default, under `%LOCALAPPDATA%`, is private.
+- On Windows, a task for a `claude.cmd` (npm) can be about 7,000 characters at most, because that is what cmd.exe can run. The native `claude.exe` takes longer ones.
 - Worktrees and their `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
 - A worktree starts from the repo's `HEAD`, so uncommitted changes in your checkout are not in it.
 - Local only: one machine, no remote hosts. Windows builds are x64 only, and Linux builds x86_64 only.

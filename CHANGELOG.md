@@ -40,8 +40,11 @@ Windows support.
   does not work.
 - Windows builds are x64 only, and unsigned: SmartScreen warns before the
   first run.
-- On Windows, Always allow never covers a shell command with an absolute path,
-  so such commands ask each time.
+- On Windows, Always allow never covers a shell command with an absolute path
+  or a `:` in a word, or a path that Windows can read as another file, such as
+  the short name `CLAUDE~1`. Such requests ask each time.
+- On Windows, end the daemon (`taskkill /IM accd.exe /F`) before you upgrade
+  or uninstall. A task for a `claude.cmd` can be about 7,000 characters at most.
 - On Windows, Stop ends a session at once, without a hangup signal first.
 - Windows has no key for "next that needs you", as on Linux.
 

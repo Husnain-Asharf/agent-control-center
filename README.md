@@ -81,9 +81,13 @@ The Windows builds are for x64. Windows support is new, so please [open an issue
 1. Download the `.msi` or the `-setup.exe`. Either one installs the app.
 2. Open it. The builds are unsigned, so SmartScreen says "Windows protected your PC". Choose More info, then Run anyway.
 
+Before you upgrade or uninstall, end the daemon: `taskkill /IM accd.exe /F`. The installer cannot replace files the running daemon uses.
+
 ## Requirements
 
-- macOS 13 or later (Apple Silicon or Intel), Linux on x86_64 with glibc 2.35 or later, such as Ubuntu 22.04, Debian 12, Fedora 36 or newer, or Windows 10 or 11 (x64).
+- macOS: 13 or later, on Apple Silicon or Intel.
+- Linux: x86_64 with glibc 2.35 or later, such as Ubuntu 22.04, Debian 12, Fedora 36 or newer.
+- Windows: 10 or 11, x64.
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and signed in, 2.1.139 or later on Windows. `claude` must work in a terminal.
 - git. On Windows, [Git for Windows](https://git-scm.com/downloads/win).
 
