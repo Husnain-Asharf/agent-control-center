@@ -62,6 +62,21 @@ jobs:
         name: cargo test
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sidecars.outcome == 'success' }}
         run: cargo test --workspace --no-fail-fast -- --quiet 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+      # Builds the Windows installers once, and checks that both programs are in them.
+      - id: bundle
+        name: Build the Windows installers
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.sidecars.outcome == 'success' }}
+        run: |
+          {
+            npx tauri build --target x86_64-pc-windows-msvc
+            bundle=target/x86_64-pc-windows-msvc/release/bundle
+            found=$(ls "$bundle"/msi/*.msi "$bundle"/nsis/*-setup.exe)
+            listing=$(7z l "$bundle"/nsis/*-setup.exe | tr -d '\r')
+            grep -q "accd.exe" <<< "$listing"
+            grep -q "acc-hook.exe" <<< "$listing"
+            programs=$(grep -E "\.exe$" <<< "$listing")
+            echo "::notice title=Windows installers::$(printf '%s\n%s' "$found" "$programs" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          } 2>&1 | tee "$RUNNER_TEMP/bundle.log"
       # One annotation per failed check, with the last 120 lines of its log, so
       # a failure can be read from the check run's annotations. GitHub keeps
       # the first 4096 characters of an annotation, so at most the last 4000
@@ -73,6 +88,7 @@ jobs:
           BUILD: ${{ steps.build.outcome }}
           SIDECARS: ${{ steps.sidecars.outcome }}
           CARGO_TEST: ${{ steps.cargo-test.outcome }}
+          BUNDLE: ${{ steps.bundle.outcome }}
         run: |
           report() {
             local outcome=$1 step=$2 log=$3 text
@@ -92,3 +108,4 @@ jobs:
           report "$BUILD" "npm run build" "$RUNNER_TEMP/build.log"
           report "$SIDECARS" "npm run sidecars" "$RUNNER_TEMP/sidecars.log"
           report "$CARGO_TEST" "cargo test" "$RUNNER_TEMP/cargo-test.log"
+          report "$BUNDLE" "Windows installers" "$RUNNER_TEMP/bundle.log"
