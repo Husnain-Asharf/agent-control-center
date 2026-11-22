@@ -16,8 +16,9 @@ Windows support.
   `%LOCALAPPDATA%\AgentControlCenter`.
 - On Windows the daemon listens on a named pipe that only your user can open,
   sessions run on ConPTY, and Stop ends every process a session started.
-- `claude` is found on Windows as `claude.exe`, `claude.cmd` or `claude.bat` on
-  the PATH, then in `%USERPROFILE%\.local\bin` and `%APPDATA%\npm`. A
+- `claude` is found on Windows on the PATH with the extensions of `PATHEXT`
+  (`claude.exe`, `claude.cmd`, `claude.bat`), then in `%USERPROFILE%\.local\bin`
+  and `%APPDATA%\npm`. A
   `claude.cmd` runs through `cmd.exe`, which passes the task on unchanged,
   except that a line break becomes a space.
 - On Windows the Always allow checks also know `cmd`, `powershell`, `pwsh`,

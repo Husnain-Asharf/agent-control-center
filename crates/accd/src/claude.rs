@@ -22,18 +22,19 @@ pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
     Some(ClaudeAdapter { program })
 }
 
-/// `$ACC_CLAUDE_BIN` if set and the file exists, else `claude.exe`,
-/// `claude.cmd` or `claude.bat` in a folder of `search_path` (the session
-/// PATH, which is the daemon's), then in one of the [`install_locations`].
+/// `$ACC_CLAUDE_BIN` if set and the file exists, else `claude` with an
+/// extension of `PATHEXT` in a folder of `search_path` (the session PATH,
+/// which is the daemon's), then in one of the [`install_locations`].
 #[cfg(windows)]
 pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
     if let Some(program) = claude_bin_env() {
         return Some(ClaudeAdapter { program });
     }
     let inherited = std::env::var("PATH").ok();
+    let names = claude_names(std::env::var("PATHEXT").ok().as_deref());
     let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
-    let program =
-        find_claude(search_path.or(inherited.as_deref()), dirs::home_dir().as_deref(), app_data.as_deref(), is_executable)?;
+    let home = dirs::home_dir();
+    let program = find_claude(search_path.or(inherited.as_deref()), &names, home.as_deref(), app_data.as_deref(), is_executable)?;
     Some(ClaudeAdapter { program })
 }
 
@@ -64,11 +65,24 @@ pub fn find_claude(search_path: Option<&str>, home: Option<&Path>, is_executable
     on_path.map(|dir| Path::new(dir).join("claude")).chain(install_locations(home)).find(|candidate| is_executable(candidate))
 }
 
-/// The names `claude` has on Windows, in the order they are tried: the
-/// native `claude.exe`, then the batch files that npm and other package
+/// The names `claude` can have on Windows: `claude` with each extension of
+/// `pathext` (the `PATHEXT` variable, `.COM;.EXE;.BAT;.CMD` when it is not
+/// set) that Windows can start, in that order, as cmd looks for a program:
+/// the native `claude.exe`, and the batch files npm and other package
 /// managers make.
 #[cfg(windows)]
-const CLAUDE_NAMES: [&str; 3] = ["claude.exe", "claude.cmd", "claude.bat"];
+pub fn claude_names(pathext: Option<&str>) -> Vec<String> {
+    let pathext = pathext.filter(|pathext| !pathext.trim().is_empty()).unwrap_or(".COM;.EXE;.BAT;.CMD");
+    let runnable = |ext: &&str| [".com", ".exe", ".bat", ".cmd"].iter().any(|known| ext.eq_ignore_ascii_case(known));
+    let mut names: Vec<String> = Vec::new();
+    for ext in pathext.split(';').map(str::trim).filter(runnable) {
+        let name = format!("claude{}", ext.to_ascii_lowercase());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
 
 /// Where Claude Code's installers put it on Windows, in the order they are
 /// tried: `%USERPROFILE%\.local\bin\claude.exe` (the native installer), then
@@ -80,18 +94,19 @@ pub fn install_locations(home: Option<&Path>, app_data: Option<&Path>) -> Vec<Pa
     native.into_iter().chain(npm).collect()
 }
 
-/// One of the [`CLAUDE_NAMES`] in a folder of `search_path` (absolute
-/// folders only; a quoted one may hold a `;`), else one of the
+/// One of the `names` (see [`claude_names`]) in a folder of `search_path`
+/// (absolute folders only; a quoted one may hold a `;`), else one of the
 /// [`install_locations`]: the first that `is_executable` accepts.
 #[cfg(windows)]
 pub fn find_claude(
     search_path: Option<&str>,
+    names: &[String],
     home: Option<&Path>,
     app_data: Option<&Path>,
     is_executable: impl Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
     let dirs = search_path.into_iter().flat_map(std::env::split_paths).filter(|dir| dir.is_absolute());
-    let on_path = dirs.flat_map(|dir| CLAUDE_NAMES.map(|name| dir.join(name)));
+    let on_path = dirs.flat_map(|dir| names.iter().map(move |name| dir.join(name)));
     on_path.chain(install_locations(home, app_data)).find(|candidate| is_executable(candidate))
 }
 
@@ -482,13 +497,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn claude_names_follow_pathext() {
+        assert_eq!(claude_names(None), ["claude.com", "claude.exe", "claude.bat", "claude.cmd"]);
+        assert_eq!(claude_names(Some("")), claude_names(None));
+        // Only what Windows can start, in the order given, each once.
+        assert_eq!(claude_names(Some(".EXE;.JS;.CMD; .exe ;.PS1;.Bat")), ["claude.exe", "claude.cmd", "claude.bat"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn find_claude_on_windows_tries_the_path_then_the_install_locations() {
         let (home, app_data) = (Some(Path::new(r"C:\Users\x")), Some(Path::new(r"C:\Users\x\AppData\Roaming")));
+        let names = claude_names(Some(".EXE;.CMD"));
         // Nothing is executable: every place is tried once, in order. Relative
         // and empty PATH entries are skipped, and quotes around one are not
         // part of the folder.
         let tried = std::cell::RefCell::new(Vec::new());
-        let found = find_claude(Some(r#"C:\a;relative;;"C:\b c""#), home, app_data, |path| {
+        let found = find_claude(Some(r#"C:\a;relative;;"C:\b c""#), &names, home, app_data, |path| {
             tried.borrow_mut().push(path.to_path_buf());
             false
         });
@@ -496,10 +521,8 @@ mod tests {
         let expected = [
             r"C:\a\claude.exe",
             r"C:\a\claude.cmd",
-            r"C:\a\claude.bat",
             r"C:\b c\claude.exe",
             r"C:\b c\claude.cmd",
-            r"C:\b c\claude.bat",
             r"C:\Users\x\.local\bin\claude.exe",
             r"C:\Users\x\AppData\Roaming\npm\claude.cmd",
         ];
@@ -507,9 +530,9 @@ mod tests {
         // The first executable one wins: claude.exe before claude.cmd, and the PATH first.
         let only = |wanted: &'static [&'static str]| move |path: &Path| wanted.iter().any(|w| path == Path::new(w));
         let npm_and_native = only(&[r"C:\a\claude.cmd", r"C:\a\claude.exe"]);
-        assert_eq!(find_claude(Some(r"C:\a"), home, app_data, npm_and_native), Some(r"C:\a\claude.exe".into()));
+        assert_eq!(find_claude(Some(r"C:\a"), &names, home, app_data, npm_and_native), Some(r"C:\a\claude.exe".into()));
         let npm = only(&[r"C:\Users\x\AppData\Roaming\npm\claude.cmd"]);
-        assert_eq!(find_claude(None, home, app_data, npm), Some(r"C:\Users\x\AppData\Roaming\npm\claude.cmd".into()));
+        assert_eq!(find_claude(None, &names, home, app_data, npm), Some(r"C:\Users\x\AppData\Roaming\npm\claude.cmd".into()));
     }
 
     #[cfg(windows)]
