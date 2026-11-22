@@ -1233,15 +1233,11 @@ fn once_only_command(words: &[&str]) -> Option<OnceOnly> {
 /// also without the extension that runs it: `git.exe` is `git`.
 fn program_name(word: &str) -> &str {
     let name = word.rsplit(PATH_SEPARATORS).next().unwrap_or(word);
-    if cfg!(windows) {
-        for extension in [".exe", ".com", ".cmd", ".bat"] {
-            let stem = name.len().checked_sub(extension.len()).filter(|&stem| stem > 0);
-            if let Some(stem) = stem.filter(|&stem| name.get(stem..).is_some_and(|ext| ext.eq_ignore_ascii_case(extension))) {
-                return &name[..stem];
-            }
-        }
+    let ends_with = |ext: &&str| name.len() > ext.len() && name.get(name.len() - ext.len()..).is_some_and(|end| end.eq_ignore_ascii_case(ext));
+    match [".exe", ".com", ".cmd", ".bat"].into_iter().find(ends_with) {
+        Some(ext) if cfg!(windows) => &name[..name.len() - ext.len()],
+        _ => name,
     }
-    name
 }
 
 /// Whether `arg` is `option`, alone or with a value after `=`. A long option
