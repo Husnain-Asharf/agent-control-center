@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Agent Control Center",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.agentcontrolcenter.app",
   "build": {
     "frontendDist": "../dist",
@@ -39,7 +39,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Supervise Claude Code sessions",
-    "longDescription": "Agent Control Center runs and supervises Claude Code sessions in git worktrees, with tool-call approvals, from one macOS window.",
+    "longDescription": "Agent Control Center runs and supervises Claude Code sessions in git worktrees, with tool-call approvals, from one window on macOS or Linux.",
     "copyright": "Copyright (c) 2026 Agent Control Center contributors",
     "externalBin": [
       "binaries/accd",

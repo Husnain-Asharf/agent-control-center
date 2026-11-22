@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-22
+
+Linux support.
+
+### Added
+
+- Linux (x86_64) builds: an AppImage, a `.deb` and an `.rpm` in each release,
+  next to the macOS `.dmg` files. They are built on Ubuntu 22.04 and need
+  glibc 2.35 or later. The data directory on Linux is
+  `~/.local/share/AgentControlCenter`.
+- CI runs the tests on Ubuntu 22.04 as well as macOS, on every branch. A failed
+  check shows the last lines of its output as an annotation.
+
+### Changed
+
+- `claude` is also looked for in `~/.npm-global/bin` and `/usr/bin`, where npm
+  puts it on Linux.
+- With no `$SHELL`, the session PATH is read from zsh, else bash, else sh.
+  It assumed zsh.
+- The title bar leaves room for the traffic lights on macOS only. Linux has
+  its own window title bar.
+- The shortcut hints show `Ctrl+K` on Linux.
+
+### Known limitations
+
+- Linux builds are x86_64 only, and unsigned like the macOS ones.
+- Linux has no key for "next that needs you" (`Cmd+J` on macOS), because
+  `Ctrl+J` is a newline in the session terminal.
+- No Windows build yet.
+
 ## [0.1.0] - 2026-11-22
 
 First public release.
@@ -37,4 +67,5 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.2.0]: ../../releases/tag/v0.2.0
 [0.1.0]: ../../releases/tag/v0.1.0

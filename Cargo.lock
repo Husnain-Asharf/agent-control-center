@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acc-hook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "acc-protocol",
  "serde_json",
@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "acc-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dirs",
  "serde",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "accd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "acc-protocol",
  "anyhow",
@@ -48,7 +48,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-control-center"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "acc-protocol",
  "anyhow",
