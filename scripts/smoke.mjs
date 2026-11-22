@@ -5,9 +5,10 @@
 //   cargo build --workspace --offline
 //   node scripts/smoke.mjs [--fake] [--out <file>] [--keep]
 //
-// --fake  uses crates/accd/tests/fixtures/fake-claude.sh instead of Claude and
-//         simulates the permission hooks over a second connection. It checks
-//         the plumbing only; items that need a real Claude are SKIP (fake).
+// --fake  uses target/debug/stand-in (crates/accd/tests/fixtures/stand-in.rs)
+//         instead of Claude and simulates the permission hooks over a second
+//         connection. It checks the plumbing only; items that need a real
+//         Claude are SKIP (fake).
 // --out   also writes the results as a markdown table to <file>.
 // --keep  leaves the temp dirs in place (for debugging).
 //
@@ -31,7 +32,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'target/debug');
 const ACCD = path.join(BIN, 'accd');
 const ACC_HOOK = path.join(BIN, 'acc-hook');
-const FIXTURE = path.join(ROOT, 'crates/accd/tests/fixtures/fake-claude.sh');
+const FIXTURE = path.join(BIN, 'stand-in');
 
 const CLAUDE_WAIT = 90_000; // Claude to reach a tool call, or to finish a turn
 const STEP_WAIT = 30_000; // everything else
@@ -376,14 +377,14 @@ async function main_() {
   for (const bin of [ACCD, ACC_HOOK]) {
     if (!fs.existsSync(bin)) throw new Error(`${bin} is missing. Run: cargo build --workspace --offline`);
   }
-  if (FAKE && !fs.existsSync(FIXTURE)) throw new Error(`${FIXTURE} is missing`);
+  if (FAKE && !fs.existsSync(FIXTURE)) throw new Error(`${FIXTURE} is missing. Run: cargo build --workspace --offline`);
 
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'acc smoke '));
   stragglerToken = path.basename(tmpRoot);
   const dataDir = path.join(tmpRoot, 'data');
   if (path.join(dataDir, 'accd.sock').length > 100) throw new Error('temp path is too long for a Unix socket');
   const repo = makeRepo(tmpRoot);
-  log(`mode: ${FAKE ? 'fake (fake-claude.sh, simulated hooks)' : 'real Claude Code'}`);
+  log(`mode: ${FAKE ? 'fake (the stand-in, simulated hooks)' : 'real Claude Code'}`);
   log(`temp: ${tmpRoot}`);
 
   let socketPath = await startAccd(dataDir);
