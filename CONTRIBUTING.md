@@ -44,7 +44,7 @@ The real smoke run starts Claude Code and makes it run a few commands, so it use
 - Rust: `cargo fmt` before you commit. Keep `cargo test --workspace` green.
 - TypeScript: strict mode is on. `npm run build` must pass with no type errors.
 - Keep pull requests small and focused on one change. Add or update tests with the change.
-- Anything that widens what "Always allow" covers needs a test and a clear reason. See the Safety model in the [README](README.md).
+- Anything that widens what "Always allow" covers needs a test and a clear reason. See [docs/safety.md](docs/safety.md).
 
 ## Commit messages
 
