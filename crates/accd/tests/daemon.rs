@@ -1573,22 +1573,35 @@ async fn windows_path_forms_always_ask() {
     for payload in [
         edit(&format!("{}\\CLAUDE~1\\settings.local.json", s.worktree)),
         edit(&format!("{}\\.claude.\\settings.local.json", s.worktree)),
+        edit(&format!("{}\\src\\a.rs ", s.worktree)),
         edit(&format!("{}\\src\\a.rs::$DATA", s.worktree)),
         edit(&format!("{}\\src\\NUL", s.worktree)),
+        edit(&format!("{}/src\\COM1.log", s.worktree)),
+        edit(&format!("\\\\?\\{}\\src\\a.rs", s.worktree)),
+        edit(&format!("\\\\.\\{}\\src\\a.rs", s.worktree)),
+        edit("D:notes.md"),
         bash("cp README.md D:notes"),
         bash("cp README.md .claude./settings.local.json"),
     ] {
+        // Always allow lets this request through once and adds no rule.
         let mut hk = hook(&h.socket(), &s.id, payload.clone()).await;
         let a = app.approval_created().await;
         assert_eq!(a.rule_preview, None, "{payload}");
-        app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::Deny }).await;
-        assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(false, Some(DENIED))), "{payload}");
+        app.call(Request::ApprovalDecide { approval_id: a.id.clone(), decision: Decision::AllowAlways }).await;
+        assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)), "{payload}");
+        let rec = decided(&mut app, &a.id).await;
+        let once_only = json!("Windows path form that the rules cannot check");
+        assert_eq!((&rec.payload["rule"], &rec.payload["once_only"]), (&Value::Null, &once_only), "{payload}");
+        // The same request asks again.
+        asks_then_deny(&mut app, &h.socket(), &s.id, payload).await;
     }
     // The rules still cover ordinary requests.
     let mut hk = hook(&h.socket(), &s.id, edit(&format!("{}\\src\\b.rs", s.worktree))).await;
     assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
     let mut hk = hook(&h.socket(), &s.id, bash("cp README.md notes.md")).await;
     assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
+    let rules = accd::store::Store::open(&h.data.join("acc.db")).unwrap().rules(&s.project_id).unwrap();
+    assert_eq!(rules.len(), 2, "{rules:?}");
     stop(server).await;
 }
 
