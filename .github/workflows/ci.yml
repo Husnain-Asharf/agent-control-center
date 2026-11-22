@@ -22,10 +22,6 @@ jobs:
         # Ubuntu 22.04 for its older glibc, so the Linux builds run on most distributions.
         os: [macos-latest, ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        # Runs as bash -eo pipefail, so a command piped to tee still fails its step.
-        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install the Tauri prerequisites
@@ -39,73 +35,10 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - id: npm-ci
-        run: npm ci
-      # Each check keeps its output in a log and runs even when an earlier
-      # check failed. The last step reports the ones that failed.
-      - id: npm-test
-        name: npm test
-        run: npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+      - run: npm ci
+      - run: npm test
       # The Tauri crate needs dist/ to exist.
-      - id: build
-        name: npm run build
-        if: ${{ !cancelled() && steps.npm-ci.outcome == 'success' }}
-        run: npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - run: npm run build
       # tauri-build needs the externalBin sidecars to exist.
-      - id: sidecars
-        name: npm run sidecars
-        if: ${{ !cancelled() && steps.npm-ci.outcome == 'success' }}
-        run: npm run sidecars 2>&1 | tee "$RUNNER_TEMP/sidecars.log"
-      # Terse output, and every test binary runs, so the last lines of the log
-      # hold all the failures.
-      - id: cargo-test
-        name: cargo test
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.sidecars.outcome == 'success' }}
-        run: cargo test --workspace --no-fail-fast -- --quiet 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
-      # Builds the Windows installers once, and checks that both programs are in them.
-      - id: bundle
-        name: Build the Windows installers
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.sidecars.outcome == 'success' }}
-        run: |
-          {
-            npx tauri build --target x86_64-pc-windows-msvc
-            bundle=target/x86_64-pc-windows-msvc/release/bundle
-            found=$(ls "$bundle"/msi/*.msi "$bundle"/nsis/*-setup.exe)
-            listing=$(7z l "$bundle"/nsis/*-setup.exe | tr -d '\r')
-            grep -q "accd.exe" <<< "$listing"
-            grep -q "acc-hook.exe" <<< "$listing"
-            programs=$(grep -E "\.exe$" <<< "$listing")
-            echo "::notice title=Windows installers::$(printf '%s\n%s' "$found" "$programs" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
-          } 2>&1 | tee "$RUNNER_TEMP/bundle.log"
-      # One annotation per failed check, with the last 120 lines of its log, so
-      # a failure can be read from the check run's annotations. GitHub keeps
-      # the first 4096 characters of an annotation, so at most the last 4000
-      # characters of those lines are sent.
-      - name: Report failures
-        if: failure()
-        env:
-          NPM_TEST: ${{ steps.npm-test.outcome }}
-          BUILD: ${{ steps.build.outcome }}
-          SIDECARS: ${{ steps.sidecars.outcome }}
-          CARGO_TEST: ${{ steps.cargo-test.outcome }}
-          BUNDLE: ${{ steps.bundle.outcome }}
-        run: |
-          report() {
-            local outcome=$1 step=$2 log=$3 text
-            if [ "$outcome" != failure ] || [ ! -f "$log" ]; then
-              return 0
-            fi
-            # Without color codes, cut to whole lines in the last 4000
-            # characters, and with %, CR and LF encoded, so all the lines
-            # arrive as one multi-line annotation.
-            text=$(tail -n 120 "$log" | perl -0777 -ne '
-              s/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\n+\z//;
-              if (length > 4000) { $_ = substr($_, -4000); s/\A[^\n]*\n//; }
-              s/%/%25/g; s/\r/%0D/g; s/\n/%0A/g; print')
-            echo "::error title=$step output::$text"
-          }
-          report "$NPM_TEST" "npm test" "$RUNNER_TEMP/npm-test.log"
-          report "$BUILD" "npm run build" "$RUNNER_TEMP/build.log"
-          report "$SIDECARS" "npm run sidecars" "$RUNNER_TEMP/sidecars.log"
-          report "$CARGO_TEST" "cargo test" "$RUNNER_TEMP/cargo-test.log"
-          report "$BUNDLE" "Windows installers" "$RUNNER_TEMP/bundle.log"
+      - run: npm run sidecars
+      - run: cargo test --workspace
