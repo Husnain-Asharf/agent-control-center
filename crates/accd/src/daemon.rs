@@ -7,7 +7,7 @@
 
 use crate::claude;
 use crate::paths::Paths;
-use crate::pty::{PtySession, SpawnSpec};
+use crate::pty::{self, PtySession, SpawnSpec};
 use crate::server::{self, OutputBuffer};
 use crate::session_path;
 use crate::store::{AllowRule, NewEvent, Store};
@@ -374,6 +374,11 @@ impl Shared {
         };
         let slug = worktree::slugify(task);
         let session_dir = self.cfg.paths.session_dir(&id);
+        // A run that cannot start leaves no worktree or settings behind.
+        let planned = claude::launch_args(&claude::settings_path(&session_dir), &id, task);
+        if let Some(why) = pty::launch_error(&program, &planned) {
+            return Err(ApiError::bad_request(why));
+        }
         let hook_bin = self.cfg.hook_bin.clone();
         let (worktree, branch, settings) = blocking(move || -> Result<_, ApiError> {
             let (worktree, branch) = worktree::create_worktree(&repo, &slug)?;

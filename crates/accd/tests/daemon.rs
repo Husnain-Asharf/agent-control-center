@@ -1640,6 +1640,15 @@ async fn a_claude_cmd_gets_the_task_as_typed() {
     let s = start_session(&mut app, &h.repo, "First line\nsecond \"line\"").await;
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     assert_eq!(run_record(&s.worktree)["args"][4], "First line second \"line\"");
+
+    // A task longer than cmd runs is refused before anything is made for it.
+    let worktrees = || std::fs::read_dir(h.repo.join(".worktrees")).unwrap().count();
+    let before = worktrees();
+    let project = add_project(&mut app, &h.repo).await;
+    let long = Request::SessionStart { project_id: project.id, agent: "claude".into(), task: format!("Long {}", "x".repeat(9000)) };
+    let too_long = "The task is too long to start Claude Code through claude.cmd. Shorten it or install Claude Code's native build.";
+    assert_eq!(app.call_err(long).await, ("bad_request".to_string(), too_long.to_string()));
+    assert_eq!(worktrees(), before, "no worktree");
     stop(server).await;
 
     // The exit code comes through cmd.

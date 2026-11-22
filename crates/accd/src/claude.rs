@@ -178,6 +178,11 @@ fn hook_command(hook_bin: &Path) -> Value {
     json!({"type": "command", "command": hook_bin.to_string_lossy(), "args": []})
 }
 
+/// Where [`write_settings`] writes a session's settings in `dir`.
+pub fn settings_path(dir: &Path) -> PathBuf {
+    dir.join("claude-settings.json")
+}
+
 /// Writes `dir/claude-settings.json` (creating `dir`) and returns its path.
 pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
@@ -189,7 +194,7 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
         }
         hooks.insert(ev.to_string(), json!([{ "hooks": [entry] }]));
     }
-    let path = dir.join("claude-settings.json");
+    let path = settings_path(dir);
     std::fs::write(&path, serde_json::to_vec_pretty(&json!({ "hooks": hooks }))?)?;
     Ok(path)
 }

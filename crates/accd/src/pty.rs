@@ -106,7 +106,7 @@ impl PtySession {
             .context("open pty")?;
 
         let program = spec.program.clone();
-        let spec = launch_spec(spec);
+        let spec = launch_spec(spec)?;
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
@@ -285,19 +285,34 @@ impl PtySession {
 
 /// The spec as it is spawned. On Windows a batch file runs through cmd.exe.
 #[cfg(unix)]
-fn launch_spec(spec: SpawnSpec) -> SpawnSpec {
-    spec
+fn launch_spec(spec: SpawnSpec) -> anyhow::Result<SpawnSpec> {
+    Ok(spec)
 }
 
 #[cfg(windows)]
-fn launch_spec(mut spec: SpawnSpec) -> SpawnSpec {
+fn launch_spec(mut spec: SpawnSpec) -> anyhow::Result<SpawnSpec> {
     if crate::conpty::is_batch_file(&spec.program) {
-        let (cmd, args, variable) = crate::conpty::batch_launch(&spec.program, &spec.args);
+        let (cmd, args, variable) = crate::conpty::batch_launch(&spec.program, &spec.args).map_err(anyhow::Error::msg)?;
         spec.program = cmd;
         spec.args = args;
         spec.env.push(variable);
     }
-    spec
+    Ok(spec)
+}
+
+/// Why `program` cannot start with `args`, when that is known before
+/// anything is set up for it. Nothing on macOS and Linux.
+#[cfg(unix)]
+pub fn launch_error(_program: &std::path::Path, _args: &[String]) -> Option<String> {
+    None
+}
+
+/// Why `program` cannot start with `args`, when that is known before
+/// anything is set up for it: a batch file whose command line is longer
+/// than cmd.exe runs.
+#[cfg(windows)]
+pub fn launch_error(program: &std::path::Path, args: &[String]) -> Option<String> {
+    crate::conpty::is_batch_file(program).then(|| crate::conpty::batch_launch(program, args).err()).flatten()
 }
 
 /// Replaces a chunk of the first output when it needs to: ConPTY's cursor

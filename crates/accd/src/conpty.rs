@@ -122,6 +122,12 @@ impl CursorRequest {
 /// Holds the command line for a batch file while `cmd.exe` reads it. The
 /// command line clears it first, so the agent does not inherit it.
 pub(crate) const BATCH_COMMAND_VAR: &str = "ACC_BATCH_COMMAND";
+/// The longest command line cmd.exe runs, in UTF-16 units, after it expands
+/// the variable.
+const CMD_LINE_MAX: usize = 8191;
+/// Room kept for the batch file's own line, which passes the arguments on
+/// with `%*` after the path of the program it runs.
+const BATCH_LINE_ROOM: usize = 1024;
 
 /// Whether `program` is a batch file, which needs `cmd.exe` to run.
 pub(crate) fn is_batch_file(program: &Path) -> bool {
@@ -133,16 +139,23 @@ pub(crate) fn is_batch_file(program: &Path) -> bool {
 /// with the command line in that variable. cmd reads the variable once and
 /// does not expand it again, so `%` in an argument stays as it is, and
 /// arguments in Unicode reach it intact. `/d` skips AutoRun commands, and
-/// `/v:off` keeps `!` as it is.
-pub(crate) fn batch_launch(program: &Path, args: &[String]) -> (PathBuf, Vec<String>, (String, String)) {
+/// `/v:off` keeps `!` as it is. Fails, saying why, when the command line is
+/// longer than cmd runs.
+pub(crate) fn batch_launch(program: &Path, args: &[String]) -> Result<(PathBuf, Vec<String>, (String, String)), String> {
+    let line = format!("set \"{BATCH_COMMAND_VAR}=\" & {}", batch_command_line(program, args));
+    if line.encode_utf16().count() > CMD_LINE_MAX - BATCH_LINE_ROOM {
+        let name = program.file_name().unwrap_or(program.as_os_str()).to_string_lossy();
+        return Err(format!(
+            "The task is too long to start Claude Code through {name}. Shorten it or install Claude Code's native build."
+        ));
+    }
     let cmd = std::env::var_os("ComSpec")
         .map(PathBuf::from)
         .filter(|cmd| cmd.is_absolute())
         .or_else(|| std::env::var_os("SystemRoot").map(|root| Path::new(&root).join(r"System32\cmd.exe")))
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
     let cmd_args = ["/d", "/e:on", "/v:off", "/c", &format!("%{BATCH_COMMAND_VAR}%")].map(String::from).to_vec();
-    let line = format!("set \"{BATCH_COMMAND_VAR}=\" & {}", batch_command_line(program, args));
-    (cmd, cmd_args, (BATCH_COMMAND_VAR.to_string(), line))
+    Ok((cmd, cmd_args, (BATCH_COMMAND_VAR.to_string(), line)))
 }
 
 /// `program` and `args`, each in double quotes, as cmd passes them on to a
@@ -228,10 +241,24 @@ mod tests {
         assert!(is_batch_file(Path::new(r"C:\npm\claude.cmd")));
         assert!(is_batch_file(Path::new(r"C:\npm\CLAUDE.BAT")));
         assert!(!is_batch_file(Path::new(r"C:\bin\claude.exe")));
-        let (cmd, args, (name, value)) = batch_launch(Path::new(r"C:\npm\claude.cmd"), &["--resume".into(), "abc".into()]);
+        let (cmd, args, (name, value)) = batch_launch(Path::new(r"C:\npm\claude.cmd"), &["--resume".into(), "abc".into()]).unwrap();
         assert!(cmd.ends_with("cmd.exe"), "{}", cmd.display());
         assert_eq!(args, ["/d", "/e:on", "/v:off", "/c", "%ACC_BATCH_COMMAND%"]);
         assert_eq!(name, "ACC_BATCH_COMMAND");
         assert_eq!(value, r#"set "ACC_BATCH_COMMAND=" & "C:\npm\claude.cmd" "--resume" "abc""#);
+    }
+
+    #[test]
+    fn a_task_longer_than_cmd_runs_is_refused() {
+        let program = Path::new(r"C:\Users\x\AppData\Roaming\npm\claude.cmd");
+        let args = |task: String| vec!["--settings".to_string(), r"C:\d\claude-settings.json".to_string(), task];
+        assert!(batch_launch(program, &args("x".repeat(6000))).is_ok());
+        let refused = batch_launch(program, &args("x".repeat(8000))).unwrap_err();
+        assert_eq!(
+            refused,
+            "The task is too long to start Claude Code through claude.cmd. Shorten it or install Claude Code's native build."
+        );
+        // UTF-16 units count, as cmd counts them: each of these takes two.
+        assert!(batch_launch(program, &args("\u{1F600}".repeat(3600))).is_err());
     }
 }
