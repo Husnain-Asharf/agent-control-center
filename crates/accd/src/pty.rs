@@ -1,7 +1,13 @@
 //! PTY sessions: spawn a program on a pseudo-terminal, stream its output,
 //! keep a capped scrollback, accept input and resizes, and stop it.
+//!
+//! On Windows the pseudo-terminal is ConPTY. Each session's processes are in
+//! a job object, so stopping a session ends all of them, and a batch file
+//! (an npm `claude.cmd`) runs through `cmd.exe /c`.
 
-use anyhow::{anyhow, Context};
+#[cfg(unix)]
+use anyhow::anyhow;
+use anyhow::Context;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -17,6 +23,7 @@ pub const SCROLLBACK_CAP: usize = 1024 * 1024;
 /// How long the waiter waits for the reader to drain after the child exits.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long kill() waits after SIGHUP before sending SIGKILL.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(1);
 
 pub struct SpawnSpec {
@@ -32,12 +39,20 @@ pub struct SpawnSpec {
 }
 
 /// The child's environment: `inherited` without the names in
-/// `spec.env_remove`, plus `spec.env`.
+/// `spec.env_remove`, plus `spec.env`. Windows ignores the case of names, so
+/// there a name is removed or replaced in any case (`Path` by `PATH`).
 fn child_env(spec: &SpawnSpec, inherited: impl IntoIterator<Item = (OsString, OsString)>) -> BTreeMap<OsString, OsString> {
-    let removed = |name: &OsString| spec.env_remove.iter().any(|r| name.as_os_str() == OsStr::new(r));
+    let removed = |name: &OsStr| spec.env_remove.iter().chain(spec.env.iter().map(|(name, _)| name)).any(|r| same_name(name, r));
     let mut env: BTreeMap<OsString, OsString> = inherited.into_iter().filter(|(name, _)| !removed(name)).collect();
     env.extend(spec.env.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))));
     env
+}
+
+fn same_name(name: &OsStr, other: &str) -> bool {
+    match cfg!(windows) {
+        true => name.to_str().is_some_and(|name| name.eq_ignore_ascii_case(other)),
+        false => name == OsStr::new(other),
+    }
 }
 
 /// Called with each chunk of output and its start offset: the number of
@@ -48,11 +63,19 @@ pub type OutputFn = Box<dyn Fn(&[u8], u64) + Send + Sync>;
 pub type ExitFn = Box<dyn FnOnce(Option<i32>) + Send>;
 
 pub struct PtySession {
+    /// The session's processes. First, so that on drop they end before the
+    /// pseudo console closes. `None` when the child had exited already.
+    #[cfg(windows)]
+    job: Option<crate::conpty::Job>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     scrollback: Arc<Mutex<Scrollback>>,
+    #[cfg(unix)]
     pid: Option<u32>,
     exited: Arc<AtomicBool>,
+    /// Set by kill(): the exit then reports no code, as a signal does on Unix.
+    #[cfg(windows)]
+    killed: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -82,6 +105,8 @@ impl PtySession {
             .openpty(PtySize { rows: spec.rows, cols: spec.cols, pixel_width: 0, pixel_height: 0 })
             .context("open pty")?;
 
+        let program = spec.program.clone();
+        let spec = launch_spec(spec);
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);
@@ -93,12 +118,27 @@ impl PtySession {
         let mut child = pair
             .slave
             .spawn_command(cmd)
-            .with_context(|| format!("spawn {}", spec.program.display()))?;
+            .with_context(|| format!("spawn {}", program.display()))?;
         // Drop our slave handle so the reader sees EOF once the child side closes.
         drop(pair.slave);
+        #[cfg(windows)]
+        let job = match child.as_raw_handle().map(crate::conpty::Job::holding) {
+            Some(Ok(job)) => Some(job),
+            // It has exited already, so there is nothing to stop.
+            _ if matches!(child.try_wait(), Ok(Some(_))) => None,
+            Some(Err(e)) => {
+                let _ = child.kill();
+                return Err(anyhow::Error::new(e).context("put the session in a job object"));
+            }
+            None => {
+                let _ = child.kill();
+                anyhow::bail!("the session's process has no handle");
+            }
+        };
 
         let mut reader = pair.master.try_clone_reader().context("clone pty reader")?;
-        let writer = pair.master.take_writer().context("take pty writer")?;
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().context("take pty writer")?));
+        #[cfg(unix)]
         let pid = child.process_id();
 
         let scrollback = Arc::new(Mutex::new(Scrollback::default()));
@@ -106,6 +146,7 @@ impl PtySession {
         let (done_tx, done_rx) = mpsc::channel::<()>();
 
         let sb = scrollback.clone();
+        let mut startup = startup_output(writer.clone());
         std::thread::Builder::new()
             .name("pty-reader".into())
             .spawn(move || {
@@ -114,14 +155,19 @@ impl PtySession {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            let replaced = startup(&buf[..n]);
+                            let chunk = replaced.as_deref().unwrap_or(&buf[..n]);
+                            if chunk.is_empty() {
+                                continue;
+                            }
                             let offset = {
                                 let mut sb = sb.lock().unwrap();
                                 let offset = sb.total;
-                                append_capped(&mut sb.bytes, &buf[..n]);
-                                sb.total += n as u64;
+                                append_capped(&mut sb.bytes, chunk);
+                                sb.total += chunk.len() as u64;
                                 offset
                             };
-                            on_output(&buf[..n], offset);
+                            on_output(chunk, offset);
                         }
                     }
                 }
@@ -130,6 +176,10 @@ impl PtySession {
             .context("spawn reader thread")?;
 
         let flag = exited.clone();
+        #[cfg(windows)]
+        let killed = Arc::new(AtomicBool::new(false));
+        #[cfg(windows)]
+        let was_killed = killed.clone();
         std::thread::Builder::new()
             .name("pty-waiter".into())
             .spawn(move || {
@@ -137,19 +187,27 @@ impl PtySession {
                     Ok(status) if status.signal().is_none() => Some(status.exit_code() as i32),
                     _ => None,
                 };
+                #[cfg(windows)]
+                let code = code.filter(|_| !was_killed.load(Ordering::SeqCst));
                 flag.store(true, Ordering::SeqCst);
                 // A grandchild can hold the slave open, so do not wait forever.
+                // ConPTY keeps its output open until the pseudo console closes.
                 let _ = done_rx.recv_timeout(DRAIN_TIMEOUT);
                 on_exit(code);
             })
             .context("spawn waiter thread")?;
 
         Ok(PtySession {
+            #[cfg(windows)]
+            job,
             master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
+            writer,
             scrollback,
+            #[cfg(unix)]
             pid,
             exited,
+            #[cfg(windows)]
+            killed,
         })
     }
 
@@ -182,6 +240,7 @@ impl PtySession {
     /// Sends SIGHUP to the child's process group, then SIGKILL after a grace
     /// period if it is still running. Returns without waiting for the grace
     /// period. Ok if the process already exited.
+    #[cfg(unix)]
     pub fn kill(&self) -> anyhow::Result<()> {
         if self.exited.load(Ordering::SeqCst) {
             return Ok(());
@@ -207,6 +266,58 @@ impl PtySession {
             .context("spawn kill thread")?;
         Ok(())
     }
+
+    /// Ends the child and every process it started, at once: Windows has no
+    /// hangup signal to give them a moment first. Ok if the child already
+    /// exited.
+    #[cfg(windows)]
+    pub fn kill(&self) -> anyhow::Result<()> {
+        if self.exited.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.killed.store(true, Ordering::SeqCst);
+        match &self.job {
+            Some(job) => job.terminate().context("end the session's processes"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The spec as it is spawned. On Windows a batch file runs through cmd.exe.
+#[cfg(unix)]
+fn launch_spec(spec: SpawnSpec) -> SpawnSpec {
+    spec
+}
+
+#[cfg(windows)]
+fn launch_spec(mut spec: SpawnSpec) -> SpawnSpec {
+    if crate::conpty::is_batch_file(&spec.program) {
+        let (cmd, args, variable) = crate::conpty::batch_launch(&spec.program, &spec.args);
+        spec.program = cmd;
+        spec.args = args;
+        spec.env.push(variable);
+    }
+    spec
+}
+
+/// Replaces a chunk of the first output when it needs to: ConPTY's cursor
+/// request is answered and taken out. `None` keeps the chunk.
+type StartupFn = Box<dyn FnMut(&[u8]) -> Option<Vec<u8>> + Send>;
+
+#[cfg(unix)]
+fn startup_output(_writer: Arc<Mutex<Box<dyn Write + Send>>>) -> StartupFn {
+    Box::new(|_| None)
+}
+
+#[cfg(windows)]
+fn startup_output(writer: Arc<Mutex<Box<dyn Write + Send>>>) -> StartupFn {
+    let mut request = crate::conpty::CursorRequest::new();
+    Box::new(move |chunk| {
+        let rest = request.remove_from(chunk)?;
+        let mut writer = writer.lock().unwrap();
+        let _ = writer.write_all(crate::conpty::CURSOR_AT_TOP_LEFT).and_then(|()| writer.flush());
+        Some(rest)
+    })
 }
 
 #[cfg(test)]
@@ -226,6 +337,27 @@ mod tests {
             cols: 120,
             rows: 32,
         }
+    }
+
+    /// `command` run by the system shell.
+    fn shell(command: &str) -> SpawnSpec {
+        match cfg!(windows) {
+            true => spec("cmd.exe", &["/d", "/c", command]),
+            false => spec("/bin/sh", &["-c", command]),
+        }
+    }
+
+    /// A program that runs for 30 s and prints nothing.
+    fn sleeper() -> SpawnSpec {
+        match cfg!(windows) {
+            true => spec("ping.exe", &["-n", "30", "127.0.0.1"]),
+            false => spec("/bin/sleep", &["30"]),
+        }
+    }
+
+    /// Prints `hello` and exits.
+    fn hello() -> SpawnSpec {
+        shell(if cfg!(windows) { "echo hello" } else { "printf hello" })
     }
 
     fn start(spec: SpawnSpec) -> (PtySession, mpsc::Receiver<Option<i32>>) {
@@ -260,7 +392,7 @@ mod tests {
 
     #[test]
     fn runs_command_and_captures_output() {
-        let (s, rx) = start(spec("/bin/sh", &["-c", "printf hello"]));
+        let (s, rx) = start(hello());
         let code = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(code, Some(0));
         let out = String::from_utf8_lossy(&s.scrollback()).to_string();
@@ -269,7 +401,7 @@ mod tests {
 
     #[test]
     fn exit_code_is_reported() {
-        let (_s, rx) = start(spec("/bin/sh", &["-c", "exit 3"]));
+        let (_s, rx) = start(shell("exit 3"));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(3));
     }
 
@@ -280,7 +412,7 @@ mod tests {
         let holder: Arc<std::sync::OnceLock<Arc<PtySession>>> = Arc::new(std::sync::OnceLock::new());
         let h = holder.clone();
         let s = PtySession::spawn(
-            spec("/bin/sh", &["-c", "printf hello"]),
+            hello(),
             Box::new(move |chunk, offset| {
                 // Reading the scrollback inside the callback must not deadlock.
                 if let Some(s) = h.get() {
@@ -305,8 +437,12 @@ mod tests {
     fn output_offsets_are_contiguous_and_end_the_scrollback() {
         let (tx, rx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
+        let command = match cfg!(windows) {
+            true => "echo abc & ping -n 2 127.0.0.1 >nul & echo defgh",
+            false => "printf abc; sleep 0.1; printf defgh",
+        };
         let s = PtySession::spawn(
-            spec("/bin/sh", &["-c", "printf abc; sleep 0.1; printf defgh"]),
+            shell(command),
             Box::new(move |chunk, offset| {
                 let _ = tx.send((offset, chunk.to_vec()));
             }),
@@ -326,7 +462,13 @@ mod tests {
             chunks += 1;
         }
         assert!(chunks >= 2, "the pause splits the output");
-        assert_eq!(all, b"abcdefgh");
+        if cfg!(windows) {
+            // ConPTY draws the screen, so there is more than the text.
+            let text = String::from_utf8_lossy(&all);
+            assert!(text.contains("abc") && text.contains("defgh"), "{text:?}");
+        } else {
+            assert_eq!(all, b"abcdefgh");
+        }
         assert_eq!(s.scrollback_with_end(), (all, end));
     }
 
@@ -356,46 +498,71 @@ mod tests {
         assert_eq!(env[OsStr::new("TERM")], "xterm-256color", "an extra replaces the inherited value");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn child_env_names_match_in_any_case_on_windows() {
+        let inherited = [("Path", r"C:\Windows"), ("ClaudeCode", "1"), ("Term", "dumb")]
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let mut s = spec("cmd.exe", &[]);
+        s.env = vec![("PATH".into(), r"C:\Windows;C:\bin".into()), ("TERM".into(), "xterm-256color".into())];
+        s.env_remove = crate::claude::removed_env();
+        let env = child_env(&s, inherited);
+        let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap())).collect();
+        assert_eq!(pairs, [("PATH", r"C:\Windows;C:\bin"), ("TERM", "xterm-256color")]);
+    }
+
     #[test]
     fn removed_variables_do_not_reach_the_child() {
-        assert!(std::env::var_os("HOME").is_some(), "the test process has HOME");
-        let mut s = spec("/bin/sh", &["-c", "echo \"HOME=${HOME-unset} TERM=$TERM\""]);
-        s.env_remove = vec!["HOME".into()];
+        // A variable every test process has, removed for the child.
+        let (name, command) = match cfg!(windows) {
+            true => ("COMPUTERNAME", "echo X=%COMPUTERNAME% TERM=%TERM%"),
+            false => ("HOME", "echo \"X=${HOME-%HOME%} TERM=$TERM\""),
+        };
+        assert!(std::env::var_os(name).is_some(), "the test process has {name}");
+        let mut s = shell(command);
+        s.env_remove = vec![name.into()];
         let (session, rx) = start(s);
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let out = String::from_utf8_lossy(&session.scrollback()).to_string();
-        assert!(out.contains("HOME=unset TERM=xterm-256color"), "{out:?}");
+        // Unset, sh prints the default and cmd leaves the reference as it is.
+        assert!(out.contains(&format!("X=%{name}% TERM=xterm-256color")), "{out:?}");
     }
 
     #[test]
     fn input_reaches_process() {
-        let (s, _rx) = start(spec("/bin/cat", &[]));
-        s.write(b"abc\r").unwrap();
+        // cat, or cmd reading commands, echo what is typed.
+        let reader = match cfg!(windows) {
+            true => spec("cmd.exe", &["/d", "/q"]),
+            false => spec("/bin/cat", &[]),
+        };
+        let (s, _rx) = start(reader);
+        s.write(b"echo abc\r").unwrap();
         wait_for(&s, b"abc");
         s.kill().unwrap();
     }
 
     #[test]
     fn resize_does_not_fail() {
-        let (s, _rx) = start(spec("/bin/sleep", &["30"]));
+        let (s, _rx) = start(sleeper());
         s.resize(100, 40).unwrap();
         s.kill().unwrap();
     }
 
     #[test]
     fn kill_stops_process() {
-        let (s, rx) = start(spec("/bin/sleep", &["30"]));
+        let (s, rx) = start(sleeper());
         s.kill().unwrap();
         rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]
     fn kill_after_exit_is_ok() {
-        let (s, rx) = start(spec("/bin/sh", &["-c", "true"]));
+        let (s, rx) = start(shell("exit 0"));
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         s.kill().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn kill_stops_child_processes() {
         let dir = tempfile::tempdir().unwrap();
@@ -423,6 +590,47 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn kill_stops_child_processes() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+        // cmd.exe runs ping.exe, so the session has two processes.
+        let (s, rx) = start(shell("ping -n 30 127.0.0.1"));
+        let job = s.job.as_ref().expect("a job for a running session");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pids = loop {
+            let pids = job.process_ids();
+            if pids.len() >= 2 {
+                break pids;
+            }
+            assert!(Instant::now() < deadline, "ping never started: {pids:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        s.kill().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), None, "a killed session has no exit code");
+        for pid in pids {
+            // SAFETY: plain calls; a null handle means the process is gone.
+            let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid as u32) };
+            if !process.is_null() {
+                let waited = unsafe { WaitForSingleObject(process, 2000) };
+                unsafe { CloseHandle(process) };
+                assert_eq!(waited, WAIT_OBJECT_0, "process {pid} still runs");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_cursor_request_does_not_reach_the_output() {
+        let (s, rx) = start(hello());
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let out = s.scrollback();
+        assert!(out.windows(5).any(|w| w == b"hello"), "{:?}", String::from_utf8_lossy(&out));
+        assert!(!out.windows(4).any(|w| w == b"\x1b[6n"), "{:?}", String::from_utf8_lossy(&out));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn kill_escalates_to_sigkill() {
         let (s, rx) = start(spec("/bin/sh", &["-c", "trap '' HUP; sleep 30"]));
@@ -432,6 +640,9 @@ mod tests {
         assert_eq!(code, None);
     }
 
+    /// ConPTY draws a screen rather than passing every byte through, so the
+    /// cap is checked where output arrives in full.
+    #[cfg(unix)]
     #[test]
     fn scrollback_is_capped() {
         let (s, rx) = start(spec(

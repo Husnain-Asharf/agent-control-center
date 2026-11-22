@@ -7,8 +7,10 @@ name = "acc-hook"
 version = "0.2.0"
 dependencies = [
  "acc-protocol",
+ "acc-transport",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -35,6 +37,7 @@ name = "accd"
 version = "0.2.0"
 dependencies = [
  "acc-protocol",
+ "acc-transport",
  "anyhow",
  "base64 0.23.1",
  "dirs",
@@ -48,6 +51,7 @@ dependencies = [
  "tokio",
  "uuid",
  "which",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

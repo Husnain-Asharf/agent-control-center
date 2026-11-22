@@ -1,6 +1,7 @@
-//! The Unix socket server. Newline-delimited JSON, one task per connection.
-//! An app connection that says hello receives every daemon event; a hook
-//! connection gets exactly one response. PTY output is coalesced here.
+//! The socket server (a named pipe on Windows). Newline-delimited JSON, one
+//! task per connection. An app connection that says hello receives every
+//! daemon event; a hook connection gets exactly one response. PTY output is
+//! coalesced here.
 
 use crate::claude::{self, HookEffect};
 use crate::daemon::{ApiError, ApprovalOutcome, Daemon, DaemonConfig, Decided, Shared};
@@ -14,14 +15,12 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Serialize;
 use serde_json::{json, Value};
+use acc_transport::{Listener, ServerStream};
 use std::fs::{File, OpenOptions, TryLockError};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, oneshot, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -37,6 +36,10 @@ const EXIT_WAIT: Duration = Duration::from_secs(5);
 /// How long `run_server` keeps trying the data dir's lock.
 const LOCK_WAIT: Duration = Duration::from_millis(500);
 
+/// The read side of a connection, and its write side.
+type Reader = BufReader<ReadHalf<ServerStream>>;
+type Writer = WriteHalf<ServerStream>;
+
 /// `run_server` fails with this when another daemon already serves the data dir.
 #[derive(Debug, thiserror::Error)]
 #[error("accd already running")]
@@ -51,8 +54,8 @@ pub struct ServerHandle {
 }
 
 /// Opens the store, marks sessions left by a previous daemon as Stopped,
-/// binds the socket (user-only) and starts serving. Fails with
-/// [`AlreadyRunning`] when another daemon serves the same data dir.
+/// binds the socket (user-only; a named pipe on Windows) and starts serving.
+/// Fails with [`AlreadyRunning`] when another daemon serves the same data dir.
 pub async fn run_server(cfg: DaemonConfig) -> anyhow::Result<ServerHandle> {
     cfg.paths.create_dirs().with_context(|| format!("create {}", cfg.paths.data.display()))?;
     // Taken before anything else is touched, so a second daemon can neither
@@ -61,30 +64,29 @@ pub async fn run_server(cfg: DaemonConfig) -> anyhow::Result<ServerHandle> {
     let (events, _) = broadcast::channel(EVENT_CAPACITY);
     let daemon = Daemon::open(&cfg.paths, events.clone()).context("open the store")?;
     let socket = &cfg.paths.socket;
-    // With the lock held, a socket file can only be left by a daemon that went away.
+    // With the lock held, a socket file can only be left by a daemon that
+    // went away. A named pipe goes away with its daemon.
+    #[cfg(unix)]
     let _ = std::fs::remove_file(socket);
-    let listener = UnixListener::bind(socket).with_context(|| format!("bind {}", socket.display()))?;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    let listener = Listener::bind(socket).with_context(|| format!("bind {}", socket.display()))?;
     let shared = Arc::new(Shared::new(cfg, events, daemon));
     let (stop, stopped) = oneshot::channel();
     let accept = tokio::spawn(accept_loop(listener, shared.clone(), stopped));
     Ok(ServerHandle { stop, accept, shared, _lock: lock })
 }
 
-/// Takes the data dir's lock, an exclusive non-blocking flock. It lasts while
-/// the returned file is open. Files are opened close-on-exec, so the agents
-/// and git do not keep it. A process that is between fork and exec does
-/// share it, though, so a lock that was just released can look held for a
-/// moment. The attempt is therefore repeated for up to [`LOCK_WAIT`].
+/// Takes the data dir's lock, an exclusive non-blocking lock on the file
+/// (flock, or LockFileEx on Windows). It lasts while the returned file is
+/// open. Files are opened close-on-exec (not inherited on Windows), so the
+/// agents and git do not keep it. A process that is between fork and exec
+/// does share it, though, so a lock that was just released can look held for
+/// a moment. The attempt is therefore repeated for up to [`LOCK_WAIT`].
 async fn lock_data_dir(path: &Path) -> anyhow::Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path).with_context(|| format!("open {}", path.display()))?;
     let deadline = tokio::time::Instant::now() + LOCK_WAIT;
     loop {
         match file.try_lock() {
@@ -114,13 +116,13 @@ impl ServerHandle {
     }
 }
 
-async fn accept_loop(listener: UnixListener, shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
+async fn accept_loop(mut listener: Listener, shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
             _ = &mut stopped => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     connections.spawn(serve(stream, shared.clone()));
                 }
                 Err(e) => {
@@ -144,8 +146,8 @@ enum Outcome {
     Close,
 }
 
-async fn serve(stream: UnixStream, shared: Arc<Shared>) {
-    let (reader, mut writer) = stream.into_split();
+async fn serve(stream: ServerStream, shared: Arc<Shared>) {
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut subscription = None;
     let mut line = Vec::new();
@@ -195,7 +197,7 @@ async fn next_event(subscription: &mut Option<broadcast::Receiver<DaemonEvent>>)
     }
 }
 
-async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> std::io::Result<()> {
+async fn send(writer: &mut Writer, msg: &ServerMsg) -> std::io::Result<()> {
     writer.write_all(&encode_line(msg)).await
 }
 
@@ -203,7 +205,7 @@ async fn handle_line(
     shared: &Arc<Shared>,
     line: &[u8],
     subscription: &mut Option<broadcast::Receiver<DaemonEvent>>,
-    conn: &mut BufReader<OwnedReadHalf>,
+    conn: &mut Reader,
 ) -> Outcome {
     let envelope: RequestEnvelope = match serde_json::from_slice(line) {
         Ok(envelope) => envelope,
@@ -288,7 +290,7 @@ enum Waited {
 
 /// Serves one hook call. `None` closes the connection without a reply,
 /// because the hook went away or the daemon is going away.
-async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut BufReader<OwnedReadHalf>) -> Option<HookReply> {
+async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Reader) -> Option<HookReply> {
     let silent = HookReply { stdout: None, exit_code: 0 };
     let (tool, summary, input) = match claude::interpret_hook(payload) {
         HookEffect::Approval { tool, summary, input } => (tool, summary, input),
@@ -333,7 +335,7 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Buf
 }
 
 /// Resolves once the peer closed its end. A hook sends nothing after its request.
-async fn wait_closed(conn: &mut BufReader<OwnedReadHalf>) {
+async fn wait_closed(conn: &mut Reader) {
     let mut buf = [0u8; 512];
     while matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {}
 }

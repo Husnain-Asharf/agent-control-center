@@ -1,6 +1,5 @@
 //! Where the daemon keeps its socket, database and per-session files.
 
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,11 +35,15 @@ impl Paths {
         self.sessions.join(session_id)
     }
 
-    /// Creates the data dir and `sessions/` with mode 0700 where missing.
-    /// The data dir can fall back to a shared temp dir, so it must stay private.
+    /// Creates the data dir and `sessions/` where missing, with mode 0700 on
+    /// macOS and Linux. The data dir can fall back to a shared temp dir, so it
+    /// must stay private. On Windows they take the access rules of the user's
+    /// own folder they are in, the local app data or the temp folder.
     pub fn create_dirs(&self) -> std::io::Result<()> {
         let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
         builder.create(&self.data)?;
         builder.create(&self.sessions)
     }
@@ -49,12 +52,11 @@ impl Paths {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn in_dir_lays_out_files() {
         let p = Paths::in_dir(Path::new("/d d"));
-        assert_eq!(p.socket, PathBuf::from("/d d/accd.sock"));
+        assert_eq!(p.socket, acc_protocol::socket_path(Path::new("/d d")));
         assert_eq!(p.db, PathBuf::from("/d d/acc.db"));
         assert_eq!(p.sessions, PathBuf::from("/d d/sessions"));
         assert_eq!(p.lock, PathBuf::from("/d d/accd.lock"));
@@ -68,7 +70,12 @@ mod tests {
         p.create_dirs().unwrap();
         p.create_dirs().unwrap();
         for dir in [&p.data, &p.sessions] {
-            assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+            assert!(dir.is_dir(), "{}", dir.display());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+            }
         }
     }
 }

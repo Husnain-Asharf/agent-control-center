@@ -6,3 +6,5 @@ pub mod paths;
 pub mod daemon;
 pub mod server;
 pub mod session_path;
+#[cfg(windows)]
+mod conpty;

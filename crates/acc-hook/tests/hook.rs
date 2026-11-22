@@ -1,9 +1,9 @@
-use acc_protocol::{permission_reply, HookReply, Request, RequestEnvelope, ServerMsg};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
-use std::path::Path;
+use acc_protocol::{permission_reply, socket_path, HookReply, Request, RequestEnvelope, ServerMsg};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread::JoinHandle;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 const DENY_MSG: &str = "Agent Control Center is not running, so this was denied. Start the app and try again.";
 
@@ -18,15 +18,30 @@ fn run(stdin: &str, socket: &Path, session: Option<&str>) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// Accepts one connection, reads one request line, then lets `respond` write the reply.
-fn fake_server(socket: &Path, respond: impl FnOnce(&mut std::os::unix::net::UnixStream) + Send + 'static) -> JoinHandle<String> {
-    let listener = UnixListener::bind(socket).unwrap();
+/// Where a daemon serving `dir` would listen: a socket in it, or a named
+/// pipe on Windows.
+fn endpoint(dir: &Path) -> PathBuf {
+    socket_path(dir)
+}
+
+/// Listens at `socket` and accepts one connection. Reads one request line,
+/// then writes `reply` and waits for the hook to close the connection, or
+/// with an empty `reply` closes it at once. Returns the request line.
+fn fake_server(socket: &Path, reply: Vec<u8>) -> JoinHandle<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut listener = runtime.block_on(async { acc_transport::Listener::bind(socket) }).unwrap();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut line = String::new();
-        BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
-        respond(&mut stream);
-        line
+        runtime.block_on(async move {
+            let (reader, mut writer) = tokio::io::split(listener.accept().await.unwrap());
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            if !reply.is_empty() {
+                writer.write_all(&reply).await.unwrap();
+                let _ = reader.read_to_end(&mut Vec::new()).await;
+            }
+            line
+        })
     })
 }
 
@@ -40,10 +55,8 @@ const STOP: &str = r#"{"hook_event_name":"Stop"}"#;
 #[test]
 fn forwards_and_prints_reply() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("accd.sock");
-    let server = fake_server(&sock, |s| {
-        s.write_all(&reply_line(1, &HookReply { stdout: Some("X".into()), exit_code: 0 })).unwrap();
-    });
+    let sock = endpoint(dir.path());
+    let server = fake_server(&sock, reply_line(1, &HookReply { stdout: Some("X".into()), exit_code: 0 }));
     let out = run(PERM, &sock, Some("sess-1"));
     let req: RequestEnvelope = serde_json::from_str(&server.join().unwrap()).unwrap();
     assert_eq!(req.id, 1);
@@ -58,10 +71,8 @@ fn forwards_and_prints_reply() {
 #[test]
 fn exit_code_from_reply_is_used() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("accd.sock");
-    let server = fake_server(&sock, |s| {
-        s.write_all(&reply_line(1, &HookReply { stdout: None, exit_code: 2 })).unwrap();
-    });
+    let sock = endpoint(dir.path());
+    let server = fake_server(&sock, reply_line(1, &HookReply { stdout: None, exit_code: 2 }));
     let out = run(STOP, &sock, Some("sess-1"));
     server.join().unwrap();
     assert!(out.stdout.is_empty());
@@ -71,7 +82,7 @@ fn exit_code_from_reply_is_used() {
 #[test]
 fn no_session_env_is_silent() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run(PERM, &dir.path().join("accd.sock"), None);
+    let out = run(PERM, &endpoint(dir.path()), None);
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(0));
 }
@@ -79,7 +90,7 @@ fn no_session_env_is_silent() {
 #[test]
 fn unreachable_daemon_denies_permission_requests() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run(PERM, &dir.path().join("missing.sock"), Some("sess-1"));
+    let out = run(PERM, &endpoint(&dir.path().join("missing")), Some("sess-1"));
     assert_eq!(String::from_utf8(out.stdout).unwrap(), permission_reply(false, Some(DENY_MSG)));
     assert_eq!(out.status.code(), Some(0));
 }
@@ -87,7 +98,7 @@ fn unreachable_daemon_denies_permission_requests() {
 #[test]
 fn unreachable_daemon_ignores_other_events() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run(STOP, &dir.path().join("missing.sock"), Some("sess-1"));
+    let out = run(STOP, &endpoint(&dir.path().join("missing")), Some("sess-1"));
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(0));
 }
@@ -95,8 +106,8 @@ fn unreachable_daemon_ignores_other_events() {
 #[test]
 fn daemon_closing_without_reply_denies() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("accd.sock");
-    let server = fake_server(&sock, |_| {});
+    let sock = endpoint(dir.path());
+    let server = fake_server(&sock, Vec::new());
     let out = run(PERM, &sock, Some("sess-1"));
     server.join().unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), permission_reply(false, Some(DENY_MSG)));
@@ -106,11 +117,9 @@ fn daemon_closing_without_reply_denies() {
 #[test]
 fn daemon_error_reply_denies() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("accd.sock");
-    let server = fake_server(&sock, |s| {
-        let msg = ServerMsg::Error { id: 1, code: "internal".into(), message: "boom".into() };
-        s.write_all(&acc_protocol::encode_line(&msg)).unwrap();
-    });
+    let sock = endpoint(dir.path());
+    let msg = ServerMsg::Error { id: 1, code: "internal".into(), message: "boom".into() };
+    let server = fake_server(&sock, acc_protocol::encode_line(&msg));
     let out = run(PERM, &sock, Some("sess-1"));
     server.join().unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), permission_reply(false, Some(DENY_MSG)));
@@ -120,10 +129,8 @@ fn daemon_error_reply_denies() {
 #[test]
 fn unparseable_reply_denies() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("accd.sock");
-    let server = fake_server(&sock, |s| {
-        s.write_all(b"not json\n").unwrap();
-    });
+    let sock = endpoint(dir.path());
+    let server = fake_server(&sock, b"not json\n".to_vec());
     let out = run(PERM, &sock, Some("sess-1"));
     server.join().unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), permission_reply(false, Some(DENY_MSG)));
@@ -132,7 +139,7 @@ fn unparseable_reply_denies() {
 #[test]
 fn invalid_stdin_is_silent() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run("this is not json", &dir.path().join("missing.sock"), Some("sess-1"));
+    let out = run("this is not json", &endpoint(&dir.path().join("missing")), Some("sess-1"));
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(0));
 }

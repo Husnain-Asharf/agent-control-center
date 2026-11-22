@@ -2,7 +2,6 @@ use acc_protocol::{
     data_dir, encode_line, permission_reply, socket_path, HookReply, Request, RequestEnvelope, ServerMsg,
 };
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 const FAIL_CLOSED_MESSAGE: &str =
@@ -14,7 +13,8 @@ fn ask_daemon(session_id: String, payload: serde_json::Value) -> Result<HookRepl
     let socket = std::env::var_os("ACC_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(|| socket_path(&data_dir()));
-    let mut stream = UnixStream::connect(socket).map_err(|_| ())?;
+    // On Windows this also fails unless the pipe is served by this user.
+    let mut stream = acc_transport::connect_blocking(&socket).map_err(|_| ())?;
     let request = RequestEnvelope { id: 1, request: Request::Hook { session_id, payload } };
     stream.write_all(&encode_line(&request)).map_err(|_| ())?;
     let mut line = String::new();

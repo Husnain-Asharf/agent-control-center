@@ -1,6 +1,5 @@
 use acc_protocol::SessionStatus;
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub struct ClaudeAdapter {
@@ -12,17 +11,34 @@ pub struct ClaudeAdapter {
 /// shell's, which an app opened from Finder or a Linux desktop may not
 /// have), then in one of the [`install_locations`]. Only an executable file
 /// counts there.
+#[cfg(unix)]
 pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
-    if let Ok(p) = std::env::var("ACC_CLAUDE_BIN") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(ClaudeAdapter { program: p });
-        }
+    if let Some(program) = claude_bin_env() {
+        return Some(ClaudeAdapter { program });
     }
     let program = which::which("claude")
         .ok()
         .or_else(|| find_claude(search_path, dirs::home_dir().as_deref(), is_executable))?;
     Some(ClaudeAdapter { program })
+}
+
+/// `$ACC_CLAUDE_BIN` if set and the file exists, else `claude.exe`,
+/// `claude.cmd` or `claude.bat` in a folder of `search_path` (the session
+/// PATH, which is the daemon's), then in one of the [`install_locations`].
+#[cfg(windows)]
+pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
+    if let Some(program) = claude_bin_env() {
+        return Some(ClaudeAdapter { program });
+    }
+    let inherited = std::env::var("PATH").ok();
+    let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
+    let program =
+        find_claude(search_path.or(inherited.as_deref()), dirs::home_dir().as_deref(), app_data.as_deref(), is_executable)?;
+    Some(ClaudeAdapter { program })
+}
+
+fn claude_bin_env() -> Option<PathBuf> {
+    std::env::var_os("ACC_CLAUDE_BIN").map(PathBuf::from).filter(|p| p.is_file())
 }
 
 /// Where Claude Code's installers put `claude`, in the order they are tried:
@@ -31,6 +47,7 @@ pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
 /// folders on Apple Silicon and on Intel (`/usr/local/bin` is also where npm
 /// with a system Node puts it on Linux), then `/usr/bin` (a distro or
 /// NodeSource Node on Linux).
+#[cfg(unix)]
 pub fn install_locations(home: Option<&Path>) -> Vec<PathBuf> {
     let in_home = home.into_iter().flat_map(|home| {
         [home.join(".local/bin/claude"), home.join(".claude/local/claude"), home.join(".npm-global/bin/claude")]
@@ -41,14 +58,56 @@ pub fn install_locations(home: Option<&Path>) -> Vec<PathBuf> {
 
 /// `claude` in a folder of `search_path` (absolute folders only), else in
 /// one of the [`install_locations`]: the first that `is_executable` accepts.
+#[cfg(unix)]
 pub fn find_claude(search_path: Option<&str>, home: Option<&Path>, is_executable: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let on_path = search_path.into_iter().flat_map(|path| path.split(':')).filter(|dir| dir.starts_with('/'));
     on_path.map(|dir| Path::new(dir).join("claude")).chain(install_locations(home)).find(|candidate| is_executable(candidate))
 }
 
+/// The names `claude` has on Windows, in the order they are tried, as cmd
+/// tries the extensions of `PATHEXT`: the native `claude.exe`, then the
+/// batch files npm and other package managers make.
+#[cfg(windows)]
+const CLAUDE_NAMES: [&str; 3] = ["claude.exe", "claude.cmd", "claude.bat"];
+
+/// Where Claude Code's installers put it on Windows, in the order they are
+/// tried: `%USERPROFILE%\.local\bin\claude.exe` (the native installer), then
+/// `%APPDATA%\npm\claude.cmd` (npm).
+#[cfg(windows)]
+pub fn install_locations(home: Option<&Path>, app_data: Option<&Path>) -> Vec<PathBuf> {
+    let native = home.map(|home| home.join(r".local\bin\claude.exe"));
+    let npm = app_data.map(|app_data| app_data.join(r"npm\claude.cmd"));
+    native.into_iter().chain(npm).collect()
+}
+
+/// One of the [`CLAUDE_NAMES`] in a folder of `search_path` (absolute
+/// folders only; a quoted one may hold a `;`), else one of the
+/// [`install_locations`]: the first that `is_executable` accepts.
+#[cfg(windows)]
+pub fn find_claude(
+    search_path: Option<&str>,
+    home: Option<&Path>,
+    app_data: Option<&Path>,
+    is_executable: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let dirs = search_path.into_iter().flat_map(std::env::split_paths).filter(|dir| dir.is_absolute());
+    let on_path = dirs.flat_map(|dir| CLAUDE_NAMES.map(|name| dir.join(name)));
+    on_path.chain(install_locations(home, app_data)).find(|candidate| is_executable(candidate))
+}
+
 /// Whether `path` is a file with an execute bit.
+#[cfg(unix)]
 pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `path` is a file Windows can start: a program (`.exe`, `.com`)
+/// or a batch file (`.cmd`, `.bat`), which runs through cmd.exe.
+#[cfg(windows)]
+pub fn is_executable(path: &Path) -> bool {
+    let runnable = |ext: &str| ["exe", "com", "cmd", "bat"].iter().any(|known| ext.eq_ignore_ascii_case(known));
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(runnable) && path.is_file()
 }
 
 /// Set by a running Claude Code in the environment of the commands it runs.
@@ -72,6 +131,7 @@ pub fn removed_env() -> Vec<String> {
     NESTED_SESSION_MARKERS.iter().chain(&PARENT_SESSION_ENV).map(|name| name.to_string()).collect()
 }
 
+#[cfg(unix)]
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
@@ -87,13 +147,28 @@ const HOOK_EVENTS: [&str; 8] = [
     "SessionEnd",
 ];
 
+/// How Claude Code runs `hook_bin`. On macOS and Linux it runs the command
+/// with `sh -c`, so the path is quoted for the shell.
+#[cfg(unix)]
+fn hook_command(hook_bin: &Path) -> Value {
+    json!({"type": "command", "command": shell_quote(&hook_bin.to_string_lossy())})
+}
+
+/// How Claude Code runs `hook_bin`. On Windows a hook with `args` runs the
+/// program directly, with no shell (Claude Code 2.1.139 or later), so a path
+/// with spaces or backslashes needs no quoting, and it works whether Claude
+/// Code has Git Bash or PowerShell.
+#[cfg(windows)]
+fn hook_command(hook_bin: &Path) -> Value {
+    json!({"type": "command", "command": hook_bin.to_string_lossy(), "args": []})
+}
+
 /// Writes `dir/claude-settings.json` (creating `dir`) and returns its path.
 pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let command = shell_quote(&hook_bin.to_string_lossy());
     let mut hooks = serde_json::Map::new();
     for ev in HOOK_EVENTS {
-        let mut entry = json!({"type": "command", "command": command});
+        let mut entry = hook_command(hook_bin);
         if ev == "PermissionRequest" {
             entry["timeout"] = json!(3600);
         }
@@ -160,7 +235,8 @@ pub fn interpret_hook(payload: &Value) -> HookEffect {
 
 pub fn summarize_tool(tool: &str, input: &Value) -> String {
     let field = match tool {
-        "Bash" => "command",
+        // PowerShell is the shell tool Claude Code also has on Windows.
+        "Bash" | "PowerShell" => "command",
         "Edit" | "Write" | "Read" | "MultiEdit" => "file_path",
         "WebFetch" => "url",
         _ => return tool.to_string(),
@@ -173,6 +249,8 @@ mod tests {
     use super::*;
     use acc_protocol::SessionStatus;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     #[test]
@@ -191,6 +269,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn settings_have_all_hooks_and_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -205,6 +284,7 @@ mod tests {
         assert!(v["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn settings_quote_hook_path_with_spaces() {
         let dir = tempfile::tempdir().unwrap();
@@ -213,9 +293,29 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "'/a b/acc-hook'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn shell_quote_escapes_single_quote() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_run_the_hook_with_no_shell_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let hook = Path::new(r"C:\Program Files\Agent Control Center\acc-hook.exe");
+        let p = write_settings(&dir.path().join("a"), hook).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for ev in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"] {
+            let entry = &v["hooks"][ev][0]["hooks"][0];
+            assert_eq!(entry["type"], "command", "{ev}");
+            // The path as it is, spaces and backslashes too, and `args`, so
+            // that Claude Code starts it directly.
+            assert_eq!(entry["command"], r"C:\Program Files\Agent Control Center\acc-hook.exe", "{ev}");
+            assert_eq!(entry["args"], json!([]), "{ev}");
+        }
+        assert_eq!(v["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"], 3600);
+        assert!(v["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
     }
 
     #[test]
@@ -271,6 +371,7 @@ mod tests {
         assert_eq!(summarize_tool("Edit", &json!(null)), "Edit");
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_locations_come_in_order() {
         let locations = [
@@ -286,6 +387,7 @@ mod tests {
         assert_eq!(install_locations(None), locations[3..].iter().map(PathBuf::from).collect::<Vec<_>>());
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_claude_tries_the_path_then_the_install_locations() {
         let home = Some(Path::new("/h"));
@@ -319,6 +421,7 @@ mod tests {
         assert_eq!(find_claude(Some("/a"), None, only(&["/usr/bin/claude"])), Some("/usr/bin/claude".into()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_claude_needs_an_executable_file() {
         let home = tempfile::tempdir().unwrap();
@@ -338,6 +441,7 @@ mod tests {
         assert_eq!(find_claude(bin.to_str(), Some(home.path()), is_executable), Some(installed));
     }
 
+    #[cfg(unix)]
     #[test]
     fn executable_files_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -356,5 +460,69 @@ mod tests {
         assert_eq!(summarize_tool("Edit", &json!({"file_path":"/a.rs"})), "/a.rs");
         assert_eq!(summarize_tool("WebFetch", &json!({"url":"http://x"})), "http://x");
         assert_eq!(summarize_tool("Grep", &json!({"pattern":"x"})), "Grep");
+    }
+
+    #[test]
+    fn summarize_powershell_uses_the_command() {
+        assert_eq!(summarize_tool("PowerShell", &json!({"command":"Get-ChildItem src"})), "Get-ChildItem src");
+        assert_eq!(summarize_tool("PowerShell", &json!({})), "PowerShell");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_locations_on_windows_come_in_order() {
+        let home = Path::new(r"C:\Users\x");
+        let app_data = Path::new(r"C:\Users\x\AppData\Roaming");
+        assert_eq!(
+            install_locations(Some(home), Some(app_data)),
+            [r"C:\Users\x\.local\bin\claude.exe", r"C:\Users\x\AppData\Roaming\npm\claude.cmd"].map(PathBuf::from)
+        );
+        assert_eq!(install_locations(None, None), Vec::<PathBuf>::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_claude_on_windows_tries_the_path_then_the_install_locations() {
+        let (home, app_data) = (Some(Path::new(r"C:\Users\x")), Some(Path::new(r"C:\Users\x\AppData\Roaming")));
+        // Nothing is executable: every place is tried once, in order. Relative
+        // and empty PATH entries are skipped, and quotes around one are not
+        // part of the folder.
+        let tried = std::cell::RefCell::new(Vec::new());
+        let found = find_claude(Some(r#"C:\a;relative;;"C:\b c""#), home, app_data, |path| {
+            tried.borrow_mut().push(path.to_path_buf());
+            false
+        });
+        assert_eq!(found, None);
+        let expected = [
+            r"C:\a\claude.exe",
+            r"C:\a\claude.cmd",
+            r"C:\a\claude.bat",
+            r"C:\b c\claude.exe",
+            r"C:\b c\claude.cmd",
+            r"C:\b c\claude.bat",
+            r"C:\Users\x\.local\bin\claude.exe",
+            r"C:\Users\x\AppData\Roaming\npm\claude.cmd",
+        ];
+        assert_eq!(tried.into_inner(), expected.map(PathBuf::from));
+        // The first executable one wins: claude.exe before claude.cmd, and the PATH first.
+        let only = |wanted: &'static [&'static str]| move |path: &Path| wanted.iter().any(|w| path == Path::new(w));
+        let npm_and_native = only(&[r"C:\a\claude.cmd", r"C:\a\claude.exe"]);
+        assert_eq!(find_claude(Some(r"C:\a"), home, app_data, npm_and_native), Some(r"C:\a\claude.exe".into()));
+        let npm = only(&[r"C:\Users\x\AppData\Roaming\npm\claude.cmd"]);
+        assert_eq!(find_claude(None, home, app_data, npm), Some(r"C:\Users\x\AppData\Roaming\npm\claude.cmd".into()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runs_programs_and_batch_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, runs) in [("a.exe", true), ("b.CMD", true), ("c.bat", true), ("d.com", true), ("claude", false), ("e.ps1", false), ("f.js", false)] {
+            let file = dir.path().join(name);
+            std::fs::write(&file, "").unwrap();
+            assert_eq!(is_executable(&file), runs, "{name}");
+        }
+        std::fs::create_dir(dir.path().join("folder.exe")).unwrap();
+        assert!(!is_executable(&dir.path().join("folder.exe")));
+        assert!(!is_executable(&dir.path().join("missing.exe")));
     }
 }

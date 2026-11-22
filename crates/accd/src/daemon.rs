@@ -20,13 +20,20 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, OnceCell};
+#[cfg(unix)]
+use tokio::sync::OnceCell;
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// How long a pending approval waits for a decision.
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(55 * 60);
 pub const CLAUDE_NOT_FOUND: &str = "Claude Code was not found. Install it or add it to your PATH.";
+/// How a user stops the daemon, for messages.
+#[cfg(unix)]
+pub const STOP_ACCD: &str = "pkill accd";
+#[cfg(windows)]
+pub const STOP_ACCD: &str = "taskkill /IM accd.exe /F";
 
 const PTY_COLS: u16 = 120;
 const PTY_ROWS: u16 = 32;
@@ -42,6 +49,9 @@ const EXPANSION_CHARS: [char; 7] = ['*', '?', '[', '{', '\\', '~', '$'];
 /// whitespace. Shell punctuation is included, so `cat server.pem;` still
 /// names `server.pem`, and so is `@`, after which curl reads a file.
 const PATH_TOKEN_SEPARATORS: [char; 16] = ['"', '\'', '=', '>', '<', ';', '&', '|', '(', ')', '`', ',', ':', '{', '}', '@'];
+/// What separates the folders of a path in a protected path check. Windows
+/// takes a backslash as well as a slash.
+const PATH_SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
 /// Input fields that hold a path. Each is checked for protected paths, and a
 /// rule without a prefix needs every one that is present inside the worktree.
 const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
@@ -86,6 +96,12 @@ const WRAPPERS: [&str; 18] = [
     "env", "xargs", "sudo", "doas", "nohup", "time", "nice", "timeout", "watch", "exec", "command", "builtin", "eval",
     "source", ".", "arch", "caffeinate", "xcrun",
 ];
+/// On Windows also its shells, which run the command or code they are
+/// given, WSL, and `start` and `runas`.
+#[cfg(windows)]
+const PLATFORM_WRAPPERS: &[&str] = &["cmd", "powershell", "pwsh", "wsl", "start", "runas"];
+#[cfg(unix)]
+const PLATFORM_WRAPPERS: &[&str] = &[];
 /// A program and one of its subcommands that publish work or call a forge
 /// API. They are asked about every time.
 const PUBLISHING: [(&str, &str); 5] = [("git", "push"), ("gh", "pr"), ("gh", "api"), ("glab", "mr"), ("glab", "api")];
@@ -178,13 +194,18 @@ pub struct DaemonConfig {
     /// searched on, so an app opened from Finder or a Linux desktop finds
     /// what a terminal would. It is asked once, when the first session
     /// starts. `None` asks no shell, and the agents keep the daemon's PATH.
+    /// Windows has none: the agents get the daemon's PATH there.
     pub login_shell: Option<PathBuf>,
 }
 
 impl DaemonConfig {
-    /// A config with the user's login shell (`$SHELL`, else zsh, bash or sh).
+    /// A config with the user's login shell (`$SHELL`, else zsh, bash or sh),
+    /// and none on Windows.
     pub fn new(paths: Paths, hook_bin: PathBuf) -> DaemonConfig {
+        #[cfg(unix)]
         let login_shell = Some(session_path::login_shell());
+        #[cfg(windows)]
+        let login_shell = None;
         DaemonConfig { paths, hook_bin, approval_timeout: DEFAULT_APPROVAL_TIMEOUT, claude_bin: None, login_shell }
     }
 }
@@ -212,10 +233,7 @@ impl ApiError {
     }
 
     fn hook_not_found(path: &Path) -> ApiError {
-        let message = format!(
-            "acc-hook was not found at {}. Run cargo build --workspace, then pkill accd and reopen the app.",
-            path.display()
-        );
+        let message = format!("acc-hook was not found at {}. Run cargo build --workspace, then {STOP_ACCD} and reopen the app.", path.display());
         ApiError { code: "hook_not_found", message }
     }
 
@@ -245,6 +263,7 @@ pub(crate) struct Shared {
     pub(crate) state: Mutex<Daemon>,
     /// The login shell's PATH once it has been asked, `None` inside when it
     /// could not be read.
+    #[cfg(unix)]
     login_path: OnceCell<Option<String>>,
 }
 
@@ -257,7 +276,13 @@ struct Spawned {
 
 impl Shared {
     pub(crate) fn new(cfg: DaemonConfig, events: broadcast::Sender<DaemonEvent>, daemon: Daemon) -> Shared {
-        Shared { cfg, events, state: Mutex::new(daemon), login_path: OnceCell::new() }
+        Shared {
+            cfg,
+            events,
+            state: Mutex::new(daemon),
+            #[cfg(unix)]
+            login_path: OnceCell::new(),
+        }
     }
 
     /// The PATH for an agent whose `claude` is `claude` (`None` while it is
@@ -267,6 +292,7 @@ impl Shared {
     /// startup, so the socket is up at once and a daemon that never starts a
     /// session never runs the shell. `None` without a login shell in the
     /// config: the agents keep the daemon's PATH.
+    #[cfg(unix)]
     async fn session_path(&self, claude: Option<&Path>) -> Option<String> {
         let shell = self.cfg.login_shell.clone()?;
         let login = self.login_path.get_or_init(|| async move {
@@ -277,6 +303,15 @@ impl Shared {
         let inherited = std::env::var("PATH").ok();
         let claude_dir = claude.and_then(Path::parent);
         Some(session_path::session_path(login, inherited.as_deref(), dirs::home_dir().as_deref(), claude_dir))
+    }
+
+    /// The PATH for an agent whose `claude` is `claude` (`None` while it is
+    /// still being looked for): the daemon's own PATH, then the folder of
+    /// `claude`. Windows has no login shell to ask.
+    #[cfg(windows)]
+    async fn session_path(&self, claude: Option<&Path>) -> Option<String> {
+        let inherited = std::env::var("PATH").ok();
+        Some(session_path::session_path(inherited.as_deref(), claude.and_then(Path::parent)))
     }
 
     /// The Claude Code binary to launch, if there is an executable one.
@@ -1007,6 +1042,8 @@ enum OnceOnly {
     NoOrigin,
     /// A tool whose input the rules do not know, such as WebSearch or an MCP tool.
     UnknownTool,
+    /// A PowerShell command. The command rules are written for Bash.
+    PowerShell,
 }
 
 impl OnceOnly {
@@ -1028,6 +1065,7 @@ impl OnceOnly {
             OnceOnly::NoCommand => "no command",
             OnceOnly::NoOrigin => "no http or https origin",
             OnceOnly::UnknownTool => "tool with no known input shape",
+            OnceOnly::PowerShell => "PowerShell command, which rules do not cover",
         }
     }
 }
@@ -1061,6 +1099,9 @@ fn scope(tool: &str) -> Option<Scope> {
 fn rule_for(tool: &str, summary: &str, input: &Value, worktree: &Path) -> Result<AllowRule, OnceOnly> {
     if request_is_protected(summary, input) {
         return Err(OnceOnly::Protected);
+    }
+    if tool == "PowerShell" {
+        return Err(OnceOnly::PowerShell);
     }
     let prefix = match scope(tool).ok_or(OnceOnly::UnknownTool)? {
         Scope::Files => None,
@@ -1142,7 +1183,7 @@ fn once_only_command(words: &[&str]) -> Option<OnceOnly> {
         }
         // After a runner, `.` is a folder (`go run .`), not the shell's `source`.
         let runs_a_folder = *first == "." && command.len() < words.len();
-        if WRAPPERS.iter().any(|wrapper| is_program(first, wrapper)) && !runs_a_folder {
+        if WRAPPERS.iter().chain(PLATFORM_WRAPPERS).any(|wrapper| is_program(first, wrapper)) && !runs_a_folder {
             return Some(OnceOnly::Wrapper);
         }
         if is_program(first, "git") {
@@ -1188,9 +1229,19 @@ fn once_only_command(words: &[&str]) -> Option<OnceOnly> {
     words.iter().any(|word| word.contains("://")).then_some(OnceOnly::Url)
 }
 
-/// A command's name without its folder: `/usr/bin/env` is `env`.
+/// A command's name without its folder: `/usr/bin/env` is `env`. On Windows
+/// also without the extension that runs it: `git.exe` is `git`.
 fn program_name(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+    let name = word.rsplit(PATH_SEPARATORS).next().unwrap_or(word);
+    if cfg!(windows) {
+        for extension in [".exe", ".com", ".cmd", ".bat"] {
+            let stem = name.len().checked_sub(extension.len()).filter(|&stem| stem > 0);
+            if let Some(stem) = stem.filter(|&stem| name.get(stem..).is_some_and(|ext| ext.eq_ignore_ascii_case(extension))) {
+                return &name[..stem];
+            }
+        }
+    }
+    name
 }
 
 /// Whether `arg` is `option`, alone or with a value after `=`. A long option
@@ -1344,9 +1395,13 @@ fn is_interpreter(word: &str) -> bool {
 }
 
 /// `python` or `pypy`, in any case, plain or a version or build of it:
-/// `python3`, `python3.12`, `python3.13t`, `python3.12-dbg`, `pypy3`.
+/// `python3`, `python3.12`, `python3.13t`, `python3.12-dbg`, `pypy3`. On
+/// Windows also `py`, the Python launcher.
 fn is_python(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
+    if cfg!(windows) && name == "py" {
+        return true;
+    }
     ["python", "pypy"].iter().any(|base| {
         name.strip_prefix(base).is_some_and(|rest| rest.chars().all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c)))
     })
@@ -1532,20 +1587,23 @@ fn shell_words(command: &str) -> Option<Vec<(&str, String)>> {
 /// Whether `summary` names a protected path: a file whose name starts with
 /// `.env` or ends with `.pem` or `.key`, a path to or through one of the
 /// [`PROTECTED_NAMES`], or one through `.config/gh` or `.config/gcloud`.
-/// Case-insensitive. The UI flags these paths too, but this check is the one
-/// that is enforced, so it must not be looser.
+/// Case-insensitive, and on Windows a backslash separates folders too. The
+/// UI flags these paths too, but this check is the one that is enforced, so
+/// it must not be looser.
 fn touches_protected_path(summary: &str) -> bool {
     let lower = summary.to_lowercase();
     // Quotes and escapes can split a name (`.s"s"h`, `.s\sh`), so the text
-    // is checked with them removed too.
+    // is checked with them removed too. On Windows a backslash is also a
+    // folder separator, so there it is checked with only the quotes removed.
     let unquoted = lower.replace(['"', '\'', '\\'], "");
-    [lower, unquoted].iter().any(|text| {
+    let windows_unquoted = cfg!(windows).then(|| lower.replace(['"', '\''], ""));
+    [Some(lower), Some(unquoted), windows_unquoted].iter().flatten().any(|text| {
         text.split(|c: char| c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c)).any(is_protected_token)
     })
 }
 
 fn is_protected_token(token: &str) -> bool {
-    let parts: Vec<&str> = token.split('/').collect();
+    let parts: Vec<&str> = token.split(PATH_SEPARATORS).collect();
     let name = parts.iter().rev().find(|part| !part.is_empty()).copied().unwrap_or_default();
     name.starts_with(".env")
         || name.ends_with(".pem")
@@ -1575,10 +1633,14 @@ mod tests {
 
     fn allows_file(path: Value) -> bool {
         let rule = AllowRule { tool: "Edit".into(), prefix: None };
-        rule_allows(&rule, "Edit", &json!({ "file_path": path }), Path::new("/repo/.worktrees/fix"))
+        rule_allows(&rule, "Edit", &json!({ "file_path": path }), Path::new(W))
     }
 
+    /// The session's worktree in these tests.
+    #[cfg(unix)]
     const W: &str = "/repo/.worktrees/fix";
+    #[cfg(windows)]
+    const W: &str = r"C:\repo\.worktrees\fix";
 
     /// The rule Always allow would add for a request in worktree `W`.
     fn rule_of(tool: &str, input: Value) -> Result<AllowRule, OnceOnly> {
@@ -2441,13 +2503,15 @@ mod tests {
 
     #[test]
     fn bash_rule_covers_only_plain_commands() {
-        let w = Path::new("/repo/.worktrees/fix");
+        let w = Path::new(W);
         let covers = |prefix: &str, command: &str| rule_allows(&bash_rule(prefix), "Bash", &json!({ "command": command }), w);
-        // Plain commands, and absolute paths inside the worktree, quoted ones too.
+        // Plain commands, and absolute paths inside the worktree, quoted ones
+        // too. On Windows a command with an absolute path always asks.
         assert!(covers("npm install", "npm install y"));
         assert!(covers("touch approval-test.txt", "touch approval-test.txt"));
-        assert!(covers("cat README.md", "cat README.md /repo/.worktrees/fix/src/a.rs"));
-        assert!(covers("cat README.md", "cat README.md \"/repo/.worktrees/fix/my file.rs\""));
+        for command in [format!("cat README.md {W}/src/a.rs"), format!("cat README.md \"{W}/my file.rs\"")] {
+            assert_eq!(covers("cat README.md", &command), cfg!(unix), "{command:?}");
+        }
         assert!(covers("git log", "git log main..feature --format=%h,%s"));
         // Globs, quotes splicing a name, escapes, braces, `~`, `$`, and paths
         // that leave the worktree.
@@ -2474,7 +2538,7 @@ mod tests {
 
     #[test]
     fn bash_rule_never_covers_attached_outside_paths() {
-        let w = Path::new("/repo/.worktrees/fix");
+        let w = Path::new(W);
         let covers = |prefix: &str, command: &str| rule_allows(&bash_rule(prefix), "Bash", &json!({ "command": command }), w);
         // A path attached to a flag or after punctuation is still a path.
         for (prefix, command) in [
@@ -2491,9 +2555,10 @@ mod tests {
         ] {
             assert!(!covers(prefix, command), "{command:?}");
         }
-        // Relative paths, and absolute ones inside the worktree, stay covered.
+        // Relative paths, and absolute ones inside the worktree, stay covered
+        // (on Windows a command with an absolute path asks).
+        assert_eq!(covers("tar xf", &format!("tar xf a.tar -C{W}/out")), cfg!(unix));
         for (prefix, command) in [
-            ("tar xf", "tar xf a.tar -C/repo/.worktrees/fix/out"),
             ("git add", "git add .github/workflows/ci.yml"),
             ("git add", "git add ./src/a.rs src/b.rs"),
             ("npm install", "npm install @types/node"),
@@ -2513,11 +2578,11 @@ mod tests {
 
     #[test]
     fn file_rule_stays_inside_the_worktree() {
-        assert!(allows_file(json!("/repo/.worktrees/fix/src/a.rs")));
-        assert!(allows_file(json!("/repo/.worktrees/fix/./a.rs")));
-        assert!(!allows_file(json!("/repo/.worktrees/fix")));
-        assert!(!allows_file(json!("/repo/.worktrees/fix/../other/a.rs")));
-        assert!(!allows_file(json!("/repo/.worktrees/fix-2/a.rs")));
+        assert!(allows_file(json!(format!("{W}/src/a.rs"))));
+        assert!(allows_file(json!(format!("{W}/./a.rs"))));
+        assert!(!allows_file(json!(W)));
+        assert!(!allows_file(json!(format!("{W}/../other/a.rs"))));
+        assert!(!allows_file(json!(format!("{W}-2/a.rs"))));
         assert!(!allows_file(json!("/etc/hosts")));
         assert!(!allows_file(json!("src/a.rs")));
         assert!(!allows_file(json!(5)));
@@ -2561,16 +2626,16 @@ mod tests {
 
     #[test]
     fn search_and_notebook_paths_stay_inside_the_worktree() {
-        let w = Path::new("/repo/.worktrees/fix");
+        let w = Path::new(W);
         let rule = |tool: &str| AllowRule { tool: tool.into(), prefix: None };
-        assert!(rule_allows(&rule("Grep"), "Grep", &json!({"pattern": "x", "path": "/repo/.worktrees/fix/src"}), w));
+        assert!(rule_allows(&rule("Grep"), "Grep", &json!({"pattern": "x", "path": format!("{W}/src")}), w));
         assert!(rule_allows(&rule("Grep"), "Grep", &json!({"pattern": "x"}), w));
         assert!(!rule_allows(&rule("Grep"), "Grep", &json!({"pattern": "x", "path": "/etc"}), w));
         assert!(!rule_allows(&rule("Glob"), "Glob", &json!({"pattern": "*", "path": 5}), w));
         let notebook = json!({"notebook_path": "/tmp/n.ipynb", "new_source": "x"});
         assert!(!rule_allows(&rule("NotebookEdit"), "NotebookEdit", &notebook, w));
         // Every path field must be inside, not just one.
-        let mixed = json!({"file_path": "/repo/.worktrees/fix/a.rs", "path": "/etc"});
+        let mixed = json!({"file_path": format!("{W}/a.rs"), "path": "/etc"});
         assert!(!rule_allows(&rule("Edit"), "Edit", &mixed, w));
     }
 
@@ -2661,6 +2726,71 @@ mod tests {
         // A search for the text ".env" is not a protected path.
         assert!(!request_is_protected("Grep", &json!({"pattern": ".env", "path": "/w/src"})));
         assert!(!request_is_protected("ls", &json!({"command": "ls", "description": "List the .env files"})));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_are_checked_with_backslashes_in_any_case() {
+        for summary in [
+            r"C:\Users\x\.ssh\id_rsa",
+            r"type C:\Users\x\.aws\credentials",
+            r"C:\Users\x\repo\.worktrees\fix\.env.local",
+            r"C:\Users\X\.SSH\config",
+            r"C:\Users\x\.config\gh\hosts.yml",
+            r"C:\Users\x\repo\.claude\settings.json",
+            r"C:\Users\x\.s's'h\id_rsa",
+            r#"C:\Users\x\.s"s"h\id_rsa"#,
+            r"cert\server.PEM",
+            r"C:/Users/x/.kube/config",
+        ] {
+            assert!(touches_protected_path(summary), "{summary:?}");
+        }
+        for summary in [r"C:\Users\x\repo\src\env.ts", r"C:\Users\x\repo\README.md", r"src\claude.rs", r"docs\gh\setup.md"] {
+            assert!(!touches_protected_path(summary), "{summary:?}");
+        }
+        assert!(request_is_protected("Edit", &json!({"file_path": r"C:\w\.mcp.json"})));
+        assert_eq!(rule_of("Edit", json!({"file_path": r"C:\Users\x\.ssh\config"})), Err(OnceOnly::Protected));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shells_and_program_extensions_get_no_rule() {
+        for (command, kind) in [
+            ("git.exe push origin main", OnceOnly::Publish),
+            ("GIT.EXE -c alias.x=!make x", OnceOnly::GitConfig),
+            ("python.exe -c \"print(1)\"", OnceOnly::InlineCode),
+            ("py -c \"print(1)\"", OnceOnly::InlineCode),
+            ("py -m timeit pass", OnceOnly::CodeModule),
+            ("node.exe -e x", OnceOnly::InlineCode),
+            ("env.exe FOO=1 make", OnceOnly::Wrapper),
+            ("powershell -Command Remove-Item src", OnceOnly::Wrapper),
+            ("pwsh -c Get-ChildItem", OnceOnly::Wrapper),
+            ("PowerShell.exe -EncodedCommand ZQBjAGgAbwA=", OnceOnly::Wrapper),
+            ("cmd.exe /c dir", OnceOnly::Wrapper),
+            ("wsl rm -rf build", OnceOnly::Wrapper),
+            ("start notepad", OnceOnly::Wrapper),
+            ("runas /user:admin cmd", OnceOnly::Wrapper),
+            ("npx.cmd -y create-vite", OnceOnly::PackageRunner),
+        ] {
+            assert_eq!(command_rule(command), Err(kind), "{command:?}");
+        }
+        // The Python launcher runs modules like python does.
+        assert_eq!(command_rule("py -m pytest -q"), Ok(bash_rule("py -m pytest")));
+        // Rules an older daemon could save do not cover them either.
+        assert!(!rule_covers("powershell -Command", "powershell -Command Remove-Item src"));
+        assert!(!rule_covers("git.exe push", "git.exe push origin main"));
+        assert!(!rule_covers("py -c", "py -c \"print(2)\""));
+    }
+
+    #[test]
+    fn powershell_commands_get_no_rule() {
+        let rule = rule_of("PowerShell", json!({"command": "Get-ChildItem"}));
+        assert_eq!(rule, Err(OnceOnly::PowerShell));
+        // A protected path is still said to be one.
+        assert_eq!(rule_of("PowerShell", json!({"command": "Get-Content .env"})), Err(OnceOnly::Protected));
+        // And no saved rule covers one.
+        let saved = AllowRule { tool: "PowerShell".into(), prefix: Some("Get-ChildItem".into()) };
+        assert!(!rule_allows(&saved, "PowerShell", &json!({"command": "Get-ChildItem"}), Path::new("/w")));
     }
 
     #[test]

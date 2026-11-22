@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(2);
         }
     };
-    let hook_bin = std::env::current_exe()?.with_file_name("acc-hook");
+    let hook_bin = std::env::current_exe()?.with_file_name(format!("acc-hook{}", std::env::consts::EXE_SUFFIX));
     let server = match run_server(DaemonConfig::new(paths, hook_bin)).await {
         Ok(server) => server,
         Err(e) if e.is::<AlreadyRunning>() => {

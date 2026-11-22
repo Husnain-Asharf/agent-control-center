@@ -17,8 +17,22 @@ pub enum WorktreeError {
     Git(String),
 }
 
+/// `git`. On Windows it gets a console of its own with no window: the
+/// daemon may have no console, and then each git would open a window.
+fn git_command() -> Command {
+    #[allow(unused_mut)]
+    let mut git = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        git.creation_flags(CREATE_NO_WINDOW);
+    }
+    git
+}
+
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = git_command()
         .arg("-C")
         .arg(dir)
         .args(args)

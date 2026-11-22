@@ -1,11 +1,13 @@
-//! End-to-end tests: a real daemon on a temp socket, driven the way the app
-//! and acc-hook drive it. `fixtures/fake-claude.sh` stands in for Claude Code.
+//! End-to-end tests: a real daemon on a temp socket (a named pipe on
+//! Windows), driven the way the app and acc-hook drive it. The `stand-in`
+//! binary (`fixtures/stand-in.rs`) stands in for Claude Code.
 
 use acc_protocol::{
     encode_line, permission_reply, Approval, ApprovalState, ClientKind, DaemonEvent, Decision, EventRecord, HookReply,
     Project, Request, RequestEnvelope, ServerMsg, Session, SessionStatus, Snapshot, PROTOCOL_VERSION,
 };
-use accd::daemon::DaemonConfig;
+use acc_transport::ClientStream;
+use accd::daemon::{DaemonConfig, STOP_ACCD};
 use accd::paths::Paths;
 use accd::server::{run_server, AlreadyRunning, ServerHandle};
 use accd::store::AllowRule;
@@ -13,13 +15,10 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -29,8 +28,52 @@ const DENIED: &str = "Denied in Agent Control Center.";
 /// The once-only reason for a runner with a flag or nothing to run.
 const RUNNER: &str = "runner with a flag or nothing to run, so a rule would cover anything it runs";
 
+/// The stand-in as Claude Code: it prints what it got, echoes its input and
+/// keeps running.
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-claude.sh")
+    PathBuf::from(env!("CARGO_BIN_EXE_stand-in"))
+}
+
+/// The stand-in under `name`, which picks what it does, in `dir`. It has run
+/// once already, with `WARM_UP` set so it exits at once. Linux does not start
+/// a file that is open for writing (ETXTBSY), and a process another test
+/// forks while the file is written keeps it open until that process execs.
+/// Once it has started, it always will. macOS checks a new executable the
+/// first time it runs, which can take longer than the daemon waits.
+fn stand_in(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(fixture(), &path).unwrap();
+    warm_up(&path);
+    path
+}
+
+fn warm_up(path: &Path) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match Command::new(path).env("WARM_UP", "1").status() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            warmed_up => break assert!(warmed_up.unwrap().success(), "{} did not warm up", path.display()),
+        }
+    }
+}
+
+/// What the stand-in wrote about its last run in `worktree`: its `args`,
+/// `cwd`, and the variables `session_id`, `socket`, `term`, `path` and
+/// `batch_command`.
+fn run_record(worktree: &str) -> Value {
+    let path = Path::new(worktree).join("stand-in-run.json");
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// The repository's root as the daemon stores it.
+fn repo_root(repo: &Path) -> PathBuf {
+    match cfg!(windows) {
+        // Git's own name for it, which may differ from the temp dir's (short names).
+        true => PathBuf::from(git(repo, &["rev-parse", "--show-toplevel"])),
+        false => std::fs::canonicalize(repo).unwrap(),
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -47,31 +90,33 @@ fn init_repo(dir: &Path) {
     git(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"]);
 }
 
-/// Writes an executable stand-in for Claude Code, acc-hook or a login shell,
-/// and runs it once with `WARM_UP` set, which makes it exit at once. Linux
-/// does not start a file that is open for writing (ETXTBSY), and a process
-/// another test forks while the script is written keeps it open until that
-/// process execs. Once it has started, it always will. macOS checks a new
-/// executable the first time it runs, which can take longer than the daemon
-/// gives a login shell when many tests start new scripts at once.
+/// Writes an executable stand-in for a login shell, and runs it once with
+/// `WARM_UP` set, which makes it exit at once (see [`stand_in`]).
+#[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let deadline = Instant::now() + WAIT;
-    loop {
-        match Command::new(&path).env("WARM_UP", "1").status() {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10))
-            }
-            warmed_up => break assert!(warmed_up.unwrap().success(), "{name} did not warm up"),
-        }
-    }
+    warm_up(&path);
     path
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Makes `path` a file that cannot be run: without the execute bit, or on
+/// Windows with no extension that runs.
+fn not_executable(path: &Path) {
+    std::fs::write(path, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
 }
 
 fn from<T: serde::de::DeserializeOwned>(v: Value) -> T {
@@ -94,14 +139,18 @@ impl Harness {
         // The daemon starts no session without an executable acc-hook.
         let bin = tmp.path().join("bin dir");
         std::fs::create_dir(&bin).unwrap();
-        script(&bin, "acc-hook", "exit 0");
+        stand_in(&bin, "acc-hook");
         Harness { tmp, repo, data }
+    }
+
+    fn hook_bin(&self) -> PathBuf {
+        self.tmp.path().join("bin dir").join(format!("acc-hook{}", std::env::consts::EXE_SUFFIX))
     }
 
     fn config(&self, claude: PathBuf) -> DaemonConfig {
         DaemonConfig {
             paths: Paths::in_dir(&self.data),
-            hook_bin: self.tmp.path().join("bin dir/acc-hook"),
+            hook_bin: self.hook_bin(),
             approval_timeout: Duration::from_secs(60),
             claude_bin: Some(claude),
             // Tests never ask the real login shell. The agents keep this process's PATH.
@@ -110,7 +159,7 @@ impl Harness {
     }
 
     fn socket(&self) -> PathBuf {
-        self.data.join("accd.sock")
+        acc_protocol::socket_path(&self.data)
     }
 }
 
@@ -124,8 +173,8 @@ async fn stop(server: ServerHandle) {
 
 /// One connection to the daemon, as the app or as acc-hook.
 struct Client {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<ReadHalf<ClientStream>>,
+    writer: WriteHalf<ClientStream>,
     next_id: u64,
     /// Events read while waiting for something else, oldest first.
     stash: VecDeque<DaemonEvent>,
@@ -133,8 +182,8 @@ struct Client {
 
 impl Client {
     async fn connect(socket: &Path) -> Client {
-        let stream = timeout(WAIT, UnixStream::connect(socket)).await.expect("connect timed out").expect("connect");
-        let (reader, writer) = stream.into_split();
+        let stream = timeout(WAIT, acc_transport::connect(socket)).await.expect("connect timed out").expect("connect");
+        let (reader, writer) = tokio::io::split(stream);
         Client { reader: BufReader::new(reader), writer, next_id: 0, stash: VecDeque::new() }
     }
 
@@ -277,10 +326,38 @@ impl Chunk {
     }
 }
 
-/// The chunks as text, carriage returns dropped.
+/// The chunks as text, carriage returns and terminal control sequences
+/// dropped (ConPTY sends them as it draws the screen).
 fn text(chunks: &[Chunk]) -> String {
     let bytes: Vec<u8> = chunks.iter().flat_map(|c| c.bytes.iter().copied()).collect();
-    String::from_utf8_lossy(&bytes).replace('\r', "")
+    plain(&String::from_utf8_lossy(&bytes))
+}
+
+/// `text` without carriage returns and escape sequences: CSI (`ESC [ ...`,
+/// up to a final letter) and OSC (`ESC ] ...`, up to BEL or `ESC \`).
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {}
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {}
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 async fn add_project(app: &mut Client, repo: &Path) -> Project {
@@ -343,9 +420,13 @@ async fn snapshot_starts_empty() {
     let mut app = Client::app(&h.socket()).await;
     let snap: Snapshot = from(app.call(Request::Snapshot).await);
     assert!(snap.projects.is_empty() && snap.sessions.is_empty() && snap.approvals.is_empty(), "{snap:?}");
-    assert_eq!(mode(&h.socket()), 0o600);
-    assert_eq!(mode(&h.data), 0o700);
-    assert_eq!(mode(&h.data.join("sessions")), 0o700);
+    // Only this user may connect: on Windows the pipe's access list says so.
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&h.socket()), 0o600);
+        assert_eq!(mode(&h.data), 0o700);
+        assert_eq!(mode(&h.data.join("sessions")), 0o700);
+    }
     stop(server).await;
 }
 
@@ -357,7 +438,7 @@ async fn project_add_and_reject_non_repo() {
 
     let project = add_project(&mut app, &h.repo).await;
     assert_eq!(project.name, "my repo");
-    assert_eq!(Path::new(&project.path), std::fs::canonicalize(&h.repo).unwrap());
+    assert_eq!(Path::new(&project.path), repo_root(&h.repo));
     assert_eq!(project.base_branch, "main");
     match app.event(|e| matches!(e, DaemonEvent::ProjectAdded(_))).await {
         DaemonEvent::ProjectAdded(p) => assert_eq!(p, project),
@@ -390,16 +471,17 @@ async fn session_start_spawns_claude_in_worktree() {
     assert_eq!(s.title, "Fix the login bug");
     assert_eq!(s.agent, "claude");
     assert_eq!(s.branch, "agent/fix-the-login-bug");
-    let root = std::fs::canonicalize(&h.repo).unwrap();
-    assert_eq!(Path::new(&s.worktree), root.join(".worktrees/fix-the-login-bug"));
+    assert_eq!(Path::new(&s.worktree), repo_root(&h.repo).join(".worktrees/fix-the-login-bug"));
     assert!(Path::new(&s.worktree).join("README.md").is_file(), "worktree checked out");
     let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
     assert!(settings.is_file());
 
-    let (out, _) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
-    assert!(out.contains(&format!("ARGS: --settings {}", settings.display())), "{out}");
-    assert!(out.contains(&format!("--session-id {}", s.id)), "{out}");
-    assert!(out.contains("Fix the login bug"), "{out}");
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    let run = run_record(&s.worktree);
+    let settings = settings.to_string_lossy();
+    assert_eq!(run["args"], json!(["--settings", settings, "--session-id", s.id, "Fix the login bug"]));
+    assert_eq!(Path::new(run["cwd"].as_str().unwrap()), Path::new(&s.worktree));
+    assert_eq!(run["session_id"], s.id);
     let rec = app.recorded("session.started").await;
     assert_eq!((rec.actor.as_str(), rec.session_id.as_deref()), ("user", Some(s.id.as_str())));
 
@@ -521,9 +603,16 @@ async fn always_allow_covers_only_plain_commands() {
     }
 
     // Plain commands run at once, also with a quoted path inside the worktree
-    // (which has a space in it).
+    // (which has a space in it). On Windows a command with an absolute path
+    // asks.
     let inside = format!("cat README.md \"{}/src/a.rs\"", s.worktree);
-    for command in ["npm install y", "touch approval-test.txt", inside.as_str()] {
+    let mut covered = vec!["npm install y", "touch approval-test.txt"];
+    if cfg!(unix) {
+        covered.push(&inside);
+    } else {
+        asks_then_deny(&mut app, &h.socket(), &s.id, bash(&inside)).await;
+    }
+    for command in covered {
         let mut hk = hook(&h.socket(), &s.id, bash(command)).await;
         assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)), "{command}");
     }
@@ -1043,13 +1132,12 @@ async fn approval_expires_with_deny() {
 
 #[tokio::test]
 async fn start_session_without_claude_fails_cleanly() {
-    // A missing file, then one without the execute bit.
-    for executable_file in [false, true] {
+    // A missing file, then one that cannot run.
+    for file_exists in [false, true] {
         let h = Harness::new();
         let claude = h.tmp.path().join("no such claude");
-        if executable_file {
-            std::fs::write(&claude, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if file_exists {
+            not_executable(&claude);
         }
         let server = start(h.config(claude)).await;
         let mut app = Client::app(&h.socket()).await;
@@ -1067,20 +1155,19 @@ async fn start_session_without_claude_fails_cleanly() {
 }
 
 fn hook_not_found(path: &Path) -> (String, String) {
-    let message = format!("acc-hook was not found at {}. Run cargo build --workspace, then pkill accd and reopen the app.", path.display());
+    let message = format!("acc-hook was not found at {}. Run cargo build --workspace, then {STOP_ACCD} and reopen the app.", path.display());
     ("hook_not_found".to_string(), message)
 }
 
 #[tokio::test]
 async fn start_session_without_hook_fails_cleanly() {
-    // A missing file, then one without the execute bit.
+    // A missing file, then one that cannot run.
     for file_exists in [false, true] {
         let h = Harness::new();
         let hook_bin = h.tmp.path().join("old build/acc-hook");
         if file_exists {
             std::fs::create_dir(hook_bin.parent().unwrap()).unwrap();
-            std::fs::write(&hook_bin, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&hook_bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+            not_executable(&hook_bin);
         }
         let mut cfg = h.config(fixture());
         cfg.hook_bin = hook_bin.clone();
@@ -1109,7 +1196,7 @@ async fn restart_without_hook_fails_cleanly() {
     app.call(Request::SessionStop { session_id: s.id.clone() }).await;
     app.recorded("session.exited").await;
 
-    let hook_bin = h.tmp.path().join("bin dir/acc-hook");
+    let hook_bin = h.hook_bin();
     std::fs::remove_file(&hook_bin).unwrap();
     let restart = Request::SessionRestart { session_id: s.id.clone() };
     assert_eq!(app.call_err(restart).await, hook_not_found(&hook_bin));
@@ -1130,6 +1217,9 @@ async fn restart_marks_orphans_stopped() {
 
     stop(server).await;
     assert!(hk.next().await.is_none(), "shutdown closes connections");
+    // On Windows the next daemon can make its pipe only once no client holds
+    // the old one.
+    drop((app, hk));
 
     let server = start(h.config(fixture())).await;
     let mut app = Client::app(&h.socket()).await;
@@ -1153,26 +1243,30 @@ async fn restart_marks_orphans_stopped() {
 #[tokio::test]
 async fn output_is_coalesced() {
     let h = Harness::new();
-    let flood = "i=1\nwhile [ \"$i\" -le 2000 ]; do\n  echo \"line $i\"\n  i=$((i + 1))\ndone\nsleep 300";
-    let server = start(h.config(script(h.tmp.path(), "flood-claude.sh", flood))).await;
+    let server = start(h.config(stand_in(h.tmp.path(), "flood-claude"))).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Flood the terminal").await;
 
-    let (out, chunks) = app.output_until(&s.id, "line 2000\n").await;
-    let all: String = (1..=2000).map(|i| format!("line {i}\n")).collect();
-    assert!(out.contains(&all), "every line, in order");
+    // ConPTY draws the screen rather than passing on every line that went
+    // by, so every line in order is checked where a PTY passes them all on.
+    let last = if cfg!(windows) { "line 2000" } else { "line 2000\n" };
+    let (out, chunks) = app.output_until(&s.id, last).await;
+    if cfg!(unix) {
+        let all: String = (1..=2000).map(|i| format!("line {i}\n")).collect();
+        assert!(out.contains(&all), "every line, in order");
+    }
     assert!(chunks.len() < 200, "{} output events for 2000 lines", chunks.len());
     assert_eq!(chunks[0].offset, 0, "a run's output starts at 0");
     stop(server).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn attach_offsets_give_exactly_once_output() {
     let h = Harness::new();
     // A steady stream of numbered lines, so each attach lands mid-stream while
     // output is still waiting in the flush buffer.
-    let stream = "i=1\nwhile [ \"$i\" -le 20000 ]; do\n  echo \"line $i\"\n  i=$((i + 1))\ndone\necho END\nsleep 300";
-    let server = start(h.config(script(h.tmp.path(), "stream-claude.sh", stream))).await;
+    let server = start(h.config(stand_in(h.tmp.path(), "stream-claude"))).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Stream numbered lines").await;
     app.output_until(&s.id, "line 200\n").await;
@@ -1211,13 +1305,49 @@ async fn attach_offsets_give_exactly_once_output() {
     stop(server).await;
 }
 
+/// ConPTY draws the screen at its own pace, so not every line that went by
+/// is in the output. Each byte of the output still arrives exactly once:
+/// the scrollback of an attach and the output after its `end` add up to the
+/// scrollback of a later attach.
+#[cfg(windows)]
+#[tokio::test]
+async fn attach_offsets_give_exactly_once_output() {
+    let h = Harness::new();
+    let server = start(h.config(stand_in(h.tmp.path(), "stream-claude"))).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Stream numbered lines").await;
+    app.next_output(&s.id).await;
+
+    // Subscribe (output read so far is dropped), then attach. Output read
+    // while waiting for the reply is the queue.
+    app.stashed_output(&s.id);
+    let id = app.send(Request::SessionAttach { session_id: s.id.clone() }).await;
+    let attached = app.reply(id).await.unwrap();
+    let mut out = B64.decode(attached["scrollback_b64"].as_str().unwrap()).unwrap();
+    let mut end = attached["end"].as_u64().unwrap();
+    assert_eq!(end, out.len() as u64, "this run's scrollback holds everything so far");
+    // Then only bytes past `end`, until the stream is over.
+    while !plain(&String::from_utf8_lossy(&out)).contains("END") {
+        let chunk = app.next_output(&s.id).await;
+        assert!(chunk.offset <= end, "gap: output jumped from {end} to {}", chunk.offset);
+        let chunk_end = chunk.offset + chunk.bytes.len() as u64;
+        if chunk_end > end {
+            out.extend_from_slice(&chunk.bytes[(end - chunk.offset) as usize..]);
+            end = chunk_end;
+        }
+    }
+    let later = app.call(Request::SessionAttach { session_id: s.id.clone() }).await;
+    let all = B64.decode(later["scrollback_b64"].as_str().unwrap()).unwrap();
+    assert!(all.starts_with(&out), "no gap and no duplicate: {} bytes put together, {} in the scrollback", out.len(), all.len());
+    stop(server).await;
+}
+
 #[tokio::test]
 async fn exit_code_sets_done_or_failed() {
     let h = Harness::new();
-    // The pause makes the last line and the exit arrive while the first
-    // output's flush interval is still running.
-    let body = "echo \"SOCKET:$ACC_SOCKET\"\necho \"TERM:$TERM\"\nsleep 0.005\necho \"bye $5\"\nexit \"$5\"";
-    let server = start(h.config(script(h.tmp.path(), "exiting-claude.sh", body))).await;
+    // It pauses before its last line, so the last line and the exit arrive
+    // while the first output's flush interval is still running.
+    let server = start(h.config(stand_in(h.tmp.path(), "exiting-claude"))).await;
     let mut app = Client::app(&h.socket()).await;
 
     let ok = start_session(&mut app, &h.repo, "0").await;
@@ -1226,9 +1356,10 @@ async fn exit_code_sets_done_or_failed() {
     assert!(done.ended_at.is_some());
     // The last output went out before the exit.
     let before = text(&app.stashed_output(&ok.id));
-    assert!(before.contains("bye 0\n"), "{before}");
-    assert!(before.contains(&format!("SOCKET:{}\n", h.socket().display())), "{before}");
-    assert!(before.contains("TERM:xterm-256color\n"), "{before}");
+    assert!(before.contains("bye 0"), "{before}");
+    let run = run_record(&ok.worktree);
+    assert_eq!(run["socket"], h.socket().to_string_lossy().as_ref());
+    assert_eq!(run["term"], "xterm-256color");
     let rec = app.recorded("session.exited").await;
     assert_eq!((rec.actor.as_str(), &rec.payload), ("agent", &json!({"exit_code": 0, "status": "done"})));
     let attached = app.call(Request::SessionAttach { session_id: ok.id.clone() }).await;
@@ -1272,20 +1403,23 @@ async fn stop_then_restart_resumes_the_session() {
     assert_eq!(statuses, vec![SessionStatus::Starting, SessionStatus::Stopped, SessionStatus::Starting]);
     // A restart is a new run: a later started_at, and output offsets from 0 again.
     assert!(restarted.started_at > s.started_at, "{} then {}", s.started_at, restarted.started_at);
-    let (_, chunks) = app.output_until(&s.id, &format!("--resume {}", s.id)).await;
+    let (_, chunks) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     assert_eq!(chunks[0].offset, 0);
+    let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
+    assert_eq!(run_record(&s.worktree)["args"], json!(["--settings", settings.to_string_lossy(), "--resume", s.id]));
 
     let (code, _) = app.call_err(Request::SessionRestart { session_id: s.id.clone() }).await;
     assert_eq!(code, "bad_request", "restart of a running session");
     stop(server).await;
 }
 
+/// On Windows a stop ends the session at once, so there is nothing to wait for.
+#[cfg(unix)]
 #[tokio::test]
 async fn restart_right_after_stop_waits_for_the_run_to_end() {
     let h = Harness::new();
     // It ignores SIGHUP, so a stop takes the grace period before SIGKILL.
-    let body = "trap '' HUP\necho \"ARGS:\" \"$@\"\necho \"ENV:$ACC_SESSION_ID\"\nsleep 300";
-    let server = start(h.config(script(h.tmp.path(), "stubborn-claude.sh", body))).await;
+    let server = start(h.config(stand_in(h.tmp.path(), "stubborn-claude"))).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Refactor").await;
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
@@ -1309,18 +1443,14 @@ async fn restart_right_after_stop_waits_for_the_run_to_end() {
     stop(server).await;
 }
 
-/// A Claude Code stand-in that prints the PATH it got.
-fn path_claude(dir: &Path) -> PathBuf {
-    script(dir, "path-claude.sh", "echo \"PATH=$PATH\"\necho \"ENV:$ACC_SESSION_ID\"\nsleep 300")
-}
-
-/// The PATH line the stand-in printed.
-fn printed_path(out: &str) -> &str {
-    out.lines().find_map(|line| line.strip_prefix("PATH=")).expect("the agent printed its PATH")
+/// The PATH the stand-in got in `worktree`.
+fn run_path(worktree: &str) -> String {
+    run_record(worktree)["path"].as_str().expect("the agent got a PATH").to_string()
 }
 
 /// `first`, then the folders of this process's PATH it lacks, then
 /// `claude_dir`: each folder once, trailing slashes aside, no empty entries.
+#[cfg(unix)]
 fn merged_path(first: &[&str], claude_dir: &Path) -> String {
     let inherited = std::env::var("PATH").unwrap();
     let claude_dir = claude_dir.to_str().unwrap();
@@ -1333,10 +1463,11 @@ fn merged_path(first: &[&str], claude_dir: &Path) -> String {
     dirs.join(":")
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sessions_get_the_login_shell_path() {
     let h = Harness::new();
-    let mut cfg = h.config(path_claude(h.tmp.path()));
+    let mut cfg = h.config(stand_in(h.tmp.path(), "path-claude"));
     // Like a login shell whose profile prints a banner and sets the PATH. It
     // gets `-l -c <command>`, so the command is `$3`.
     let shell = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$3\"";
@@ -1344,31 +1475,32 @@ async fn sessions_get_the_login_shell_path() {
     let server = start(cfg).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Show the PATH").await;
-    let (out, _) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     // The login PATH first, then what an app started from a terminal
     // inherits (nvm set up in ~/.zshrc), then the folder of claude.
     let expected = merged_path(&["/login/bin", "/usr/bin", "/bin"], h.tmp.path());
-    assert_eq!(printed_path(&out), expected);
+    assert_eq!(run_path(&s.worktree), expected);
 
     // A restarted run gets it too.
     app.call(Request::SessionStop { session_id: s.id.clone() }).await;
     app.recorded("session.exited").await;
     app.stashed_output(&s.id);
     app.call(Request::SessionRestart { session_id: s.id.clone() }).await;
-    let (out, _) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
-    assert_eq!(printed_path(&out), expected);
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    assert_eq!(run_path(&s.worktree), expected);
     stop(server).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sessions_get_the_install_folders_when_the_login_shell_fails() {
     let h = Harness::new();
-    let mut cfg = h.config(path_claude(h.tmp.path()));
+    let mut cfg = h.config(stand_in(h.tmp.path(), "path-claude"));
     cfg.login_shell = Some(script(h.tmp.path(), "broken-shell", "exit 1"));
     let server = start(cfg).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Show the PATH").await;
-    let (out, _) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
 
     // This process's PATH, with whichever of these it lacks put first and
     // the folder of claude last.
@@ -1377,7 +1509,66 @@ async fn sessions_get_the_install_folders_when_the_login_shell_fails() {
     let present: Vec<&str> = inherited.split(':').map(|dir| dir.trim_end_matches('/')).collect();
     let missing: Vec<&str> =
         ["/opt/homebrew/bin", "/usr/local/bin", local_bin.to_str().unwrap()].into_iter().filter(|dir| !present.contains(dir)).collect();
-    assert_eq!(printed_path(&out), merged_path(&missing, h.tmp.path()));
+    assert_eq!(run_path(&s.worktree), merged_path(&missing, h.tmp.path()));
+    stop(server).await;
+}
+
+/// Windows has no login shell: sessions get this process's PATH, with the
+/// folder of claude added.
+#[cfg(windows)]
+#[tokio::test]
+async fn sessions_get_the_daemon_path_and_the_folder_of_claude() {
+    let h = Harness::new();
+    let tools = h.tmp.path().join("tools dir");
+    std::fs::create_dir(&tools).unwrap();
+    let server = start(h.config(stand_in(&tools, "path-claude"))).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Show the PATH").await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    let inherited = std::env::var("PATH").unwrap();
+    assert_eq!(run_path(&s.worktree), format!("{};{}", inherited.trim_end_matches(';'), tools.display()));
+    stop(server).await;
+}
+
+/// npm installs `claude.cmd`, a batch file that hands its arguments on with
+/// `%*`. It runs through cmd.exe, and the task reaches the program as it was
+/// typed, whatever cmd would make of it. Only a line break becomes a space.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_claude_cmd_gets_the_task_as_typed() {
+    let h = Harness::new();
+    let npm = h.tmp.path().join("npm dir");
+    std::fs::create_dir(&npm).unwrap();
+    let shim = |name: &str, program: &str| {
+        stand_in(&npm, program);
+        // Like the batch file npm writes for a program.
+        let body = format!(
+            "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\"%dp0%\\{program}.exe\"   %*\r\n"
+        );
+        std::fs::write(npm.join(name), body).unwrap();
+        npm.join(name)
+    };
+    let server = start(h.config(shim("claude.cmd", "fake-claude"))).await;
+    let mut app = Client::app(&h.socket()).await;
+    let task = r#"Fix "this" & that | more < in > out ^ %PATH% !x! (y) C:\dir\ 100% done\"#;
+    let s = start_session(&mut app, &h.repo, task).await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    let run = run_record(&s.worktree);
+    let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
+    assert_eq!(run["args"], json!(["--settings", settings.to_string_lossy(), "--session-id", s.id, task]));
+    assert_eq!(run["batch_command"], Value::Null, "the command line is not passed on");
+
+    let s = start_session(&mut app, &h.repo, "First line\nsecond \"line\"").await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    assert_eq!(run_record(&s.worktree)["args"][4], "First line second \"line\"");
+    stop(server).await;
+
+    // The exit code comes through cmd.
+    let h = Harness::new();
+    let server = start(h.config(shim("exiting.cmd", "exiting-claude"))).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "3").await;
+    assert_eq!(app.status(&s.id, SessionStatus::Failed).await.exit_code, Some(3));
     stop(server).await;
 }
 
@@ -1444,6 +1635,7 @@ async fn lagging_app_client_is_closed() {
 async fn second_daemon_on_same_dir_is_refused() {
     let h = Harness::new();
     let server = start(h.config(fixture())).await;
+    #[cfg(unix)]
     assert_eq!(mode(&h.data.join("accd.lock")), 0o600);
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Keep running").await;
@@ -1453,12 +1645,15 @@ async fn second_daemon_on_same_dir_is_refused() {
     assert!(err.is::<AlreadyRunning>(), "{err:#}");
     // The first one still serves (its socket was left alone), and the refused
     // one did not mark its running session Stopped in the store.
-    let mut app = Client::app(&h.socket()).await;
-    let snap: Snapshot = from(app.call(Request::Snapshot).await);
+    let mut other = Client::app(&h.socket()).await;
+    let snap: Snapshot = from(other.call(Request::Snapshot).await);
     assert_eq!(snap.sessions[0].status, SessionStatus::Starting);
-    let events: Vec<EventRecord> = from(app.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100 }).await);
+    let events: Vec<EventRecord> = from(other.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100 }).await);
     assert!(!events.iter().any(|e| e.actor == "system"), "{events:?}");
     stop(server).await;
+    // On Windows the next daemon can make its pipe only once no client holds
+    // the old one.
+    drop((app, other));
 
     // Once it has shut down, the dir is free again.
     let server = start(h.config(fixture())).await;
@@ -1486,7 +1681,7 @@ fn second_accd_exits_when_one_is_running() {
     };
     let _first = KillOnDrop(accd().stdout(std::process::Stdio::null()).spawn().unwrap());
     let deadline = Instant::now() + WAIT;
-    while std::os::unix::net::UnixStream::connect(data.join("accd.sock")).is_err() {
+    while acc_transport::connect_blocking(&acc_protocol::socket_path(&data)).is_err() {
         assert!(Instant::now() < deadline, "accd never listened");
         std::thread::sleep(Duration::from_millis(50));
     }
