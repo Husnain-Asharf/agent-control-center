@@ -52,6 +52,17 @@ const PATH_TOKEN_SEPARATORS: [char; 16] = ['"', '\'', '=', '>', '<', ';', '&', '
 /// What separates the folders of a path in a protected path check. Windows
 /// takes a backslash as well as a slash.
 const PATH_SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
+/// Whose path rules apply. The rule checks take it as a parameter, so the
+/// Windows rules are tested on every platform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Platform {
+    Unix,
+    Windows,
+}
+
+/// The platform this daemon runs on.
+const PLATFORM: Platform = if cfg!(windows) { Platform::Windows } else { Platform::Unix };
 /// Input fields that hold a path. Each is checked for protected paths, and a
 /// rule without a prefix needs every one that is present inside the worktree.
 const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
@@ -1044,6 +1055,11 @@ enum OnceOnly {
     UnknownTool,
     /// A PowerShell command. The command rules are written for Bash.
     PowerShell,
+    /// On Windows, a path form that can name another file than its text
+    /// says, or one the rules cannot place: a short (8.3) name, a name
+    /// ending in a dot or a space, a device, a data stream, a drive letter
+    /// in a command, or a `\\?\` or `\\.\` prefix.
+    WindowsPath,
 }
 
 impl OnceOnly {
@@ -1066,6 +1082,7 @@ impl OnceOnly {
             OnceOnly::NoOrigin => "no http or https origin",
             OnceOnly::UnknownTool => "tool with no known input shape",
             OnceOnly::PowerShell => "PowerShell command, which rules do not cover",
+            OnceOnly::WindowsPath => "Windows path form that the rules cannot check",
         }
     }
 }
@@ -1097,11 +1114,20 @@ fn scope(tool: &str) -> Option<Scope> {
 /// This one check decides which requests never get a rule, and
 /// `request_approval` lets no rule allow those.
 fn rule_for(tool: &str, summary: &str, input: &Value, worktree: &Path) -> Result<AllowRule, OnceOnly> {
+    rule_for_on(tool, summary, input, worktree, PLATFORM)
+}
+
+/// [`rule_for`] by the path rules of `platform`.
+fn rule_for_on(tool: &str, summary: &str, input: &Value, worktree: &Path, platform: Platform) -> Result<AllowRule, OnceOnly> {
     if request_is_protected(summary, input) {
         return Err(OnceOnly::Protected);
     }
     if tool == "PowerShell" {
         return Err(OnceOnly::PowerShell);
+    }
+    let paths = PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str));
+    if paths.into_iter().any(|path| names_another_file(path, worktree, platform)) {
+        return Err(OnceOnly::WindowsPath);
     }
     let prefix = match scope(tool).ok_or(OnceOnly::UnknownTool)? {
         Scope::Files => None,
@@ -1111,7 +1137,7 @@ fn rule_for(tool: &str, summary: &str, input: &Value, worktree: &Path) -> Result
         }
         Scope::Command => {
             let command = input.get("command").and_then(Value::as_str).ok_or(OnceOnly::NoCommand)?;
-            Some(command_prefix(command, worktree)?)
+            Some(command_prefix(command, worktree, platform)?)
         }
     };
     Ok(AllowRule { tool: tool.to_string(), prefix })
@@ -1120,7 +1146,7 @@ fn rule_for(tool: &str, summary: &str, input: &Value, worktree: &Path) -> Result
 /// A Bash rule's prefix: the command's first two words as written (a quoted
 /// word stays whole), joined by one space. For a runner it is the runner and
 /// what it runs: `npx vitest`, `uv run pytest`, `python3 -m pytest`.
-fn command_prefix(command: &str, worktree: &Path) -> Result<String, OnceOnly> {
+fn command_prefix(command: &str, worktree: &Path, platform: Platform) -> Result<String, OnceOnly> {
     let words = shell_words(command).ok_or(OnceOnly::NotPlain)?;
     if words.is_empty() {
         return Err(OnceOnly::NoCommand);
@@ -1129,8 +1155,12 @@ fn command_prefix(command: &str, worktree: &Path) -> Result<String, OnceOnly> {
     if let Some(kind) = once_only_command(&texts) {
         return Err(kind);
     }
+    // Anywhere in the command, not only in the words the rule keeps.
+    if texts.iter().any(|word| is_windows_path_word(word, platform)) {
+        return Err(OnceOnly::WindowsPath);
+    }
     let prefix = words.iter().take(rule_length(&texts)).map(|(raw, _)| *raw).collect::<Vec<_>>().join(" ");
-    match is_plain_command(&prefix, worktree) {
+    match is_plain_command(&prefix, worktree, platform) {
         true => Ok(prefix),
         false => Err(OnceOnly::NotPlain),
     }
@@ -1439,6 +1469,11 @@ fn rule_preview(rule: &AllowRule) -> String {
 
 /// Whether `rule` covers this request without widening what the user approved.
 fn rule_allows(rule: &AllowRule, tool: &str, input: &Value, worktree: &Path) -> bool {
+    rule_allows_on(rule, tool, input, worktree, PLATFORM)
+}
+
+/// [`rule_allows`] by the path rules of `platform`.
+fn rule_allows_on(rule: &AllowRule, tool: &str, input: &Value, worktree: &Path, platform: Platform) -> bool {
     if rule.tool != tool {
         return false;
     }
@@ -1446,7 +1481,7 @@ fn rule_allows(rule: &AllowRule, tool: &str, input: &Value, worktree: &Path) -> 
         (Some(Scope::Command), Some(prefix)) => {
             let Some(command) = input.get("command").and_then(Value::as_str) else { return false };
             let whole_words = command.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
-            whole_words && prefix_may_cover(command, prefix) && is_plain_command(command, worktree)
+            whole_words && prefix_may_cover(command, prefix) && is_plain_command(command, worktree, platform)
         }
         (Some(Scope::Origin), Some(origin)) => {
             input.get("url").and_then(Value::as_str).and_then(web_origin).is_some_and(|url| url == origin)
@@ -1454,7 +1489,7 @@ fn rule_allows(rule: &AllowRule, tool: &str, input: &Value, worktree: &Path) -> 
         // Every path in the input must be inside the session's worktree.
         (Some(Scope::Files), None) => PATH_FIELDS.iter().all(|field| match input.get(field) {
             None => true,
-            Some(Value::String(path)) => is_inside(Path::new(path), worktree),
+            Some(Value::String(path)) => is_inside(Path::new(path), worktree, platform),
             Some(_) => false,
         }),
         // A Bash or WebFetch rule without a prefix would allow anything, and
@@ -1503,28 +1538,93 @@ fn web_origin(url: &str) -> Option<String> {
     })
 }
 
-/// Lexically below `dir`: absolute, without `..`, and not `dir` itself.
-fn is_inside(path: &Path, dir: &Path) -> bool {
-    path.is_absolute() && !path.components().any(|c| c == Component::ParentDir) && path.starts_with(dir) && path != dir
+/// Lexically below `dir`: absolute, without `..`, not `dir` itself, and on
+/// Windows with no path form below `dir` that can name another file.
+fn is_inside(path: &Path, dir: &Path, platform: Platform) -> bool {
+    path.is_absolute()
+        && !path.components().any(|c| c == Component::ParentDir)
+        && path.starts_with(dir)
+        && path != dir
+        && !names_another_file(&path.to_string_lossy(), dir, platform)
 }
 
 /// Whether a rule may cover this Bash command: no shell operators and no
-/// expansions, no `..` step, and every absolute path inside the worktree.
-/// Words also split on `=`, `,` and `:`, so `--output=/etc/x` and
-/// `host:/etc/x` are checked, and so is a path attached to a flag.
-fn is_plain_command(command: &str, worktree: &Path) -> bool {
+/// expansions, no `..` step, every absolute path inside the worktree, and on
+/// Windows no word that [`is_windows_path_word`]. Words also split on `=`,
+/// `,` and `:`, so `--output=/etc/x` and `host:/etc/x` are checked, and so
+/// is a path attached to a flag.
+fn is_plain_command(command: &str, worktree: &Path, platform: Platform) -> bool {
     if SHELL_OPERATORS.iter().any(|op| command.contains(op)) || command.contains(EXPANSION_CHARS) {
         return false;
     }
     let Some(words) = shell_words(command) else { return false };
-    words.iter().flat_map(|(_, text)| text.split(['=', ',', ':'])).all(|part| stays_in_worktree(part, worktree))
+    if words.iter().any(|(_, text)| is_windows_path_word(text, platform)) {
+        return false;
+    }
+    words.iter().flat_map(|(_, text)| text.split(['=', ',', ':'])).all(|part| stays_in_worktree(part, worktree, platform))
 }
 
 /// Whether a part of a word names nothing outside the worktree: no `..`
 /// step, and any absolute path in it inside. A URL's `//host` is outside.
-fn stays_in_worktree(part: &str, worktree: &Path) -> bool {
+fn stays_in_worktree(part: &str, worktree: &Path, platform: Platform) -> bool {
     let climbs = part.contains("../") || part.ends_with("..");
-    !climbs && absolute_path(part).is_none_or(|path| is_inside(Path::new(path), worktree))
+    !climbs && absolute_path(part).is_none_or(|path| is_inside(Path::new(path), worktree, platform))
+}
+
+/// Whether, on Windows, `path` can name another file than its text says,
+/// or one the rules cannot place: it has a `\\?\` or `\\.\` prefix, a `:`
+/// other than after a leading drive letter (an alternate data stream such
+/// as `a.rs::$DATA`), a drive letter with no folder after it (`D:notes` is
+/// relative to drive D's current folder), or a name that
+/// [`is_windows_alias_name`]. Either slash separates folders. The worktree's
+/// own path is the daemon's, so only the names below it are checked when
+/// `path` is in it. Never on Unix.
+fn names_another_file(path: &str, worktree: &Path, platform: Platform) -> bool {
+    if platform == Platform::Unix {
+        return false;
+    }
+    let unified = path.replace('\\', "/");
+    if ["//?/", "//./", "/??/"].iter().any(|prefix| unified.starts_with(prefix)) {
+        return true;
+    }
+    let rest = match unified.as_bytes() {
+        [letter, b':', b'/', ..] if letter.is_ascii_alphabetic() => &unified[2..],
+        [letter, b':', ..] if letter.is_ascii_alphabetic() => return true,
+        _ => unified.as_str(),
+    };
+    if rest.contains(':') {
+        return true;
+    }
+    let below = Path::new(path).strip_prefix(worktree).ok().map(|below| below.to_string_lossy().replace('\\', "/"));
+    below.as_deref().unwrap_or(rest).split('/').any(is_windows_alias_name)
+}
+
+/// Whether Windows reads a folder or file name as another one, or as a
+/// device: a short (8.3) name, which has a `~`; a name that ends in a dot or
+/// a space, which Windows drops (`.claude.` is `.claude`); or a device such
+/// as `NUL`, `CON` or `COM1`, also with an extension (`nul.txt`). `.` and
+/// `..` are not names.
+fn is_windows_alias_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or(name).trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = |port: &str| {
+        base.strip_prefix(port).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
+    };
+    let device = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT");
+    name.contains('~') || name.ends_with('.') || name.ends_with(' ') || device
+}
+
+/// Whether a word of a Bash command is, on Windows, a path the rules cannot
+/// check: one with a `:` (a drive letter, as in `D:notes` or `C:/x`, or a
+/// data stream), a `//?/` or `//./` prefix, or a name that
+/// [`is_windows_alias_name`]. Never on Unix.
+fn is_windows_path_word(word: &str, platform: Platform) -> bool {
+    platform == Platform::Windows
+        && (word.contains(':')
+            || ["//?/", "//./"].iter().any(|prefix| word.starts_with(prefix))
+            || word.split(['/', '\\', '=', ',']).any(is_windows_alias_name))
 }
 
 /// The absolute path in a part of a word: all of it when it starts with
@@ -1651,6 +1751,16 @@ mod tests {
     /// Whether a Bash rule for `prefix` covers `command` in worktree `W`.
     fn rule_covers(prefix: &str, command: &str) -> bool {
         rule_allows(&bash_rule(prefix), "Bash", &json!({ "command": command }), Path::new(W))
+    }
+
+    /// The rule for a command with a word Windows can read as another path,
+    /// such as one with a `:` (a drive or a stream) or a name ending in a
+    /// dot: `rule` on macOS and Linux, none on Windows.
+    fn unix_only_rule(rule: AllowRule) -> Result<AllowRule, OnceOnly> {
+        match cfg!(windows) {
+            true => Err(OnceOnly::WindowsPath),
+            false => Ok(rule),
+        }
     }
 
     #[test]
@@ -1819,10 +1929,10 @@ mod tests {
             ("git add -u", "git add"),
             ("git status -uall", "git status"),
             ("git fetch origin", "git fetch"),
-            ("git clone git@github.com:x/y.git", "git clone"),
         ] {
             assert_eq!(command_rule(command), Ok(bash_rule(prefix)), "{command:?}");
         }
+        assert_eq!(command_rule("git clone git@github.com:x/y.git"), unix_only_rule(bash_rule("git clone")));
         assert!(rule_covers("git rebase", "git rebase origin/main"));
     }
 
@@ -2075,18 +2185,18 @@ mod tests {
             ("uv run pytest", "uv run pytest"),
             ("touch approval-test.txt", "touch approval-test.txt"),
             ("git config user.email", "git config"),
-            ("git clone git@github.com:x/y.git", "git clone"),
             ("coverage run -m pytest", "coverage run -m pytest"),
         ] {
             assert_eq!(command_rule(command), Ok(bash_rule(prefix)), "{command:?}");
         }
+        assert_eq!(command_rule("git clone git@github.com:x/y.git"), unix_only_rule(bash_rule("git clone")));
         assert!(rule_covers("npm install", "npm install y"));
         assert!(rule_covers("git rebase", "git rebase origin/main"));
         assert!(rule_covers("python3 -m pytest", "python3 -m pytest tests"));
         assert!(rule_covers("uv run pytest", "uv run pytest -q"));
         assert!(rule_covers("touch approval-test.txt", "touch approval-test.txt"));
         assert!(rule_covers("git config", "git config user.name"));
-        assert!(rule_covers("git clone", "git clone -q git@github.com:x/z.git"));
+        assert_eq!(rule_covers("git clone", "git clone -q git@github.com:x/z.git"), cfg!(unix));
         assert!(rule_covers("coverage run -m pytest", "coverage run -m pytest -x"));
         // As before, `mise exec` with `--` asks every time.
         assert_eq!(command_rule("mise exec node@20 -- node x.js"), Err(OnceOnly::PackageRunner));
@@ -2105,7 +2215,7 @@ mod tests {
             assert!(!rule_covers("git clone", command), "{command:?}");
         }
         // Other clone flags keep the rule.
-        assert_eq!(command_rule("git clone -q --depth 1 git@github.com:x/y.git"), Ok(bash_rule("git clone")));
+        assert_eq!(command_rule("git clone -q --depth 1 git@github.com:x/y.git"), unix_only_rule(bash_rule("git clone")));
     }
 
     #[test]
@@ -2164,8 +2274,8 @@ mod tests {
         assert!(!rule_covers("git clone", "git clone https://github.com/x/y"));
         assert!(!rule_covers("cat README.md", "cat README.md file:///repo/.worktrees/fix/a.rs"));
         // A host without a scheme is not a URL.
-        assert_eq!(command_rule("git clone git@github.com:x/y.git"), Ok(bash_rule("git clone")));
-        assert_eq!(command_rule("curl -s localhost:3000/api"), Ok(bash_rule("curl -s")));
+        assert_eq!(command_rule("git clone git@github.com:x/y.git"), unix_only_rule(bash_rule("git clone")));
+        assert_eq!(command_rule("curl -s localhost:3000/api"), unix_only_rule(bash_rule("curl -s")));
     }
 
     #[test]
@@ -2299,10 +2409,10 @@ mod tests {
             // Other python, uv and go commands keep their two words.
             ("python3 scripts/build.py --fast", "python3 scripts/build.py"),
             ("uv sync --frozen", "uv sync"),
-            ("go test ./...", "go test"),
         ] {
             assert_eq!(command_rule(command), Ok(bash_rule(prefix)), "{command:?}");
         }
+        assert_eq!(command_rule("go test ./..."), unix_only_rule(bash_rule("go test")));
         let preview = command_rule("python3 -m pytest -q").map(|rule| rule_preview(&rule));
         assert_eq!(preview.as_deref(), Ok("`python3 -m pytest` commands"));
         // A flag in place of what it runs, or nothing, makes it once-only.
@@ -2552,15 +2662,15 @@ mod tests {
             assert!(!covers(prefix, command), "{command:?}");
         }
         // Relative paths, and absolute ones inside the worktree, stay covered
-        // (on Windows a command with an absolute path asks).
+        // (on Windows a command with an absolute path, or a `:`, asks).
         assert_eq!(covers("tar xf", &format!("tar xf a.tar -C{W}/out")), cfg!(unix));
+        assert_eq!(covers("curl -s", "curl -s localhost:3000/api"), cfg!(unix));
         for (prefix, command) in [
             ("git add", "git add .github/workflows/ci.yml"),
             ("git add", "git add ./src/a.rs src/b.rs"),
             ("npm install", "npm install @types/node"),
             ("cat README.md", "cat README.md \"my dir/a.rs\""),
             ("git log", "git log origin/main..HEAD"),
-            ("curl -s", "curl -s localhost:3000/api"),
         ] {
             assert!(covers(prefix, command), "{command:?}");
         }
@@ -2776,6 +2886,157 @@ mod tests {
         assert!(!rule_covers("powershell -Command", "powershell -Command Remove-Item src"));
         assert!(!rule_covers("git.exe push", "git.exe push origin main"));
         assert!(!rule_covers("py -c", "py -c \"print(2)\""));
+    }
+
+    #[test]
+    fn windows_reads_some_names_as_other_ones() {
+        for name in [
+            "CLAUDE~1",
+            "SETTIN~1.JSO",
+            ".claude.",
+            ".mcp.json.",
+            ".ssh ",
+            "...",
+            "NUL",
+            "nul.txt",
+            "Con",
+            "aux.c",
+            "PRN",
+            "COM1.log",
+            "lpt9",
+            "COM\u{b9}",
+            "CONOUT$",
+            "nul .txt",
+        ] {
+            assert!(is_windows_alias_name(name), "{name:?}");
+        }
+        for name in ["", ".", "..", "src", ".claude", ".env", "a.rs", "COM", "COM10", "LPT0", "console", "nullable.rs", "auxiliary", "README.md"] {
+            assert!(!is_windows_alias_name(name), "{name:?}");
+        }
+    }
+
+    /// The Windows path rules, checked on every platform with paths that
+    /// use slashes. Windows paths with backslashes are checked on Windows.
+    #[test]
+    fn windows_path_forms_never_get_or_match_a_rule() {
+        let w = "/repo/.worktrees/fix";
+        let worktree = Path::new(w);
+        let forms = [
+            // Short (8.3) names, which can be `.claude`, `.env` or `.mcp.json`.
+            format!("{w}/CLAUDE~1/settings.local.json"),
+            format!("{w}/MCPJSO~1.JSO"),
+            // Names ending in a dot or a space, which Windows drops.
+            format!("{w}/.claude./settings.local.json"),
+            format!("{w}/.claude /settings.local.json"),
+            format!("{w}/.mcp.json."),
+            // Data streams.
+            format!("{w}/src/a.rs::$DATA"),
+            format!("{w}/src/a.rs:hidden"),
+            // Devices.
+            format!("{w}/src/NUL"),
+            format!("{w}/COM1.log"),
+            format!("{w}/con.txt"),
+            // Prefixes that skip the usual path rules, with either slash.
+            r"\\?\C:\repo\.worktrees\fix\src\a.rs".to_string(),
+            "//?/C:/repo/.worktrees/fix/src/a.rs".to_string(),
+            r"\\.\C:\repo\.worktrees\fix\src\a.rs".to_string(),
+            r"\??\C:\repo\.worktrees\fix\src\a.rs".to_string(),
+            // A drive with no folder after it: relative to that drive's current folder.
+            "D:notes".to_string(),
+            "C:src/a.rs".to_string(),
+            // Mixed slashes.
+            format!("{w}\\CLAUDE~1/settings.local.json"),
+            format!("{w}/src\\NUL"),
+        ];
+        let files = AllowRule { tool: "Write".into(), prefix: None };
+        for path in &forms {
+            let input = json!({ "file_path": path, "content": "x" });
+            assert!(names_another_file(path, worktree, Platform::Windows), "{path:?}");
+            // Allowed once only; a path that also reads as a protected one says so.
+            let once = rule_for_on("Write", path, &input, worktree, Platform::Windows);
+            assert!(matches!(once, Err(OnceOnly::WindowsPath | OnceOnly::Protected)), "{path:?}: {once:?}");
+            assert!(!rule_allows_on(&files, "Write", &input, worktree, Platform::Windows), "{path:?}");
+            // Unix reads them as they are written.
+            assert!(!names_another_file(path, worktree, Platform::Unix), "{path:?}");
+        }
+        // Ordinary paths keep their rule, and the worktree's own path is not checked.
+        for path in [format!("{w}/src/a.rs"), format!("{w}/./src/a.rs"), format!("{w}/src/a.b.rs")] {
+            let input = json!({ "file_path": path, "content": "x" });
+            assert_eq!(rule_for_on("Write", &path, &input, worktree, Platform::Windows), Ok(files.clone()), "{path:?}");
+            assert!(rule_allows_on(&files, "Write", &input, worktree, Platform::Windows), "{path:?}");
+        }
+        let short = Path::new("/Users/RUNNER~1/repo/.worktrees/fix");
+        assert!(!names_another_file("/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs", short, Platform::Windows));
+        assert!(names_another_file("/Users/RUNNER~1/repo/.worktrees/fix/CLAUDE~1/x", short, Platform::Windows));
+        assert!(names_another_file("C:/x/a.rs:s", worktree, Platform::Windows), "a stream after a drive");
+        assert!(!names_another_file("C:/x/a.rs", worktree, Platform::Windows), "a drive with a folder");
+    }
+
+    #[test]
+    fn windows_command_words_with_a_drive_or_an_alias_get_no_rule() {
+        let worktree = Path::new("/repo/.worktrees/fix");
+        let rule = bash_rule("cp README.md");
+        let covers = |command: &str, platform| rule_allows_on(&rule, "Bash", &json!({ "command": command }), worktree, platform);
+        let rule_of = |command: &str, platform| rule_for_on("Bash", command, &json!({ "command": command }), worktree, platform);
+        for command in [
+            // A drive-relative path is outside the worktree.
+            "cp README.md D:notes",
+            "cp README.md --target-directory=D:notes",
+            "cp README.md C:/repo/.worktrees/fix/x",
+            // Streams, names Windows changes, devices and prefixes.
+            "cp README.md notes.txt:hidden",
+            "cp README.md .claude./settings.local.json",
+            "cp README.md .mcp.json.",
+            "cp README.md \"docs /x\"",
+            "cp README.md NUL",
+            "cp README.md docs/com1.txt",
+            "cp README.md //?/C:/repo/x",
+        ] {
+            assert!(!covers(command, Platform::Windows), "{command:?}");
+            assert_eq!(rule_of(command, Platform::Windows), Err(OnceOnly::WindowsPath), "{command:?}");
+            // On Unix these are plain names in the worktree.
+            if !command.contains("C:/") && !command.contains("//?/") {
+                assert!(covers(command, Platform::Unix), "{command:?}");
+                assert_eq!(rule_of(command, Platform::Unix), Ok(rule.clone()), "{command:?}");
+            }
+        }
+        // Ordinary commands keep their rule on Windows.
+        for command in ["cp README.md docs/notes.txt", "cp README.md ./docs/a.b.txt", "cp README.md \"my dir/a.txt\""] {
+            assert!(covers(command, Platform::Windows), "{command:?}");
+            assert_eq!(rule_of(command, Platform::Windows), Ok(rule.clone()), "{command:?}");
+        }
+        // A word Windows reads as another path anywhere in the command, not
+        // only in the words the rule keeps, gets no rule.
+        assert_eq!(rule_of("cp README.md docs/x README.md.", Platform::Windows), Err(OnceOnly::WindowsPath));
+    }
+
+    /// The same checks with real Windows paths, as the daemon runs them.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_with_backslashes_never_get_or_match_a_rule() {
+        let files = AllowRule { tool: "Edit".into(), prefix: None };
+        for path in [
+            format!(r"{W}\CLAUDE~1\settings.local.json"),
+            format!(r"{W}\.claude.\settings.local.json"),
+            format!(r"{W}\.mcp.json "),
+            format!(r"{W}\src\a.rs::$DATA"),
+            format!(r"\\?\{W}\src\a.rs"),
+            format!(r"{W}\src\CON"),
+            format!(r"{W}/CLAUDE~1\settings.local.json"),
+            r"C:src\a.rs".to_string(),
+        ] {
+            let input = json!({ "file_path": path, "old_string": "a", "new_string": "b" });
+            let once = rule_of("Edit", input.clone());
+            assert!(matches!(once, Err(OnceOnly::WindowsPath | OnceOnly::Protected)), "{path:?}: {once:?}");
+            assert!(!rule_allows(&files, "Edit", &input, Path::new(W)), "{path:?}");
+        }
+        for path in [format!(r"{W}\src\a.rs"), format!("{W}/src/a.rs"), format!(r"{W}\.\src\a.rs")] {
+            let input = json!({ "file_path": path, "old_string": "a", "new_string": "b" });
+            assert_eq!(rule_of("Edit", input.clone()), Ok(files.clone()), "{path:?}");
+            assert!(rule_allows(&files, "Edit", &input, Path::new(W)), "{path:?}");
+        }
+        assert!(!rule_covers("cp README.md", "cp README.md D:notes"));
+        assert_eq!(command_rule("cp README.md D:notes"), Err(OnceOnly::WindowsPath));
     }
 
     #[test]

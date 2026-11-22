@@ -1558,6 +1558,40 @@ async fn sessions_get_the_install_folders_when_the_login_shell_fails() {
     stop(server).await;
 }
 
+/// On Windows a short (8.3) name, a name ending in a dot, a data stream, a
+/// device or a drive can name another file than the rules see, so such a
+/// request always asks, also under a rule that covers its neighbours.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_path_forms_always_ask() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Edit files").await;
+    allow_always(&mut app, &h.socket(), &s.id, edit(&format!("{}\\src\\a.rs", s.worktree))).await;
+    allow_always(&mut app, &h.socket(), &s.id, bash("cp README.md docs.md")).await;
+    for payload in [
+        edit(&format!("{}\\CLAUDE~1\\settings.local.json", s.worktree)),
+        edit(&format!("{}\\.claude.\\settings.local.json", s.worktree)),
+        edit(&format!("{}\\src\\a.rs::$DATA", s.worktree)),
+        edit(&format!("{}\\src\\NUL", s.worktree)),
+        bash("cp README.md D:notes"),
+        bash("cp README.md .claude./settings.local.json"),
+    ] {
+        let mut hk = hook(&h.socket(), &s.id, payload.clone()).await;
+        let a = app.approval_created().await;
+        assert_eq!(a.rule_preview, None, "{payload}");
+        app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::Deny }).await;
+        assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(false, Some(DENIED))), "{payload}");
+    }
+    // The rules still cover ordinary requests.
+    let mut hk = hook(&h.socket(), &s.id, edit(&format!("{}\\src\\b.rs", s.worktree))).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
+    let mut hk = hook(&h.socket(), &s.id, bash("cp README.md notes.md")).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
+    stop(server).await;
+}
+
 /// Windows has no login shell: sessions get this process's PATH, with the
 /// folder of claude added.
 #[cfg(windows)]
