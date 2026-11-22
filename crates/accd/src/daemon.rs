@@ -2964,11 +2964,13 @@ mod tests {
             // Unix reads them as they are written.
             assert!(!names_another_file(path, worktree, Platform::Unix), "{path:?}");
         }
-        // Ordinary paths keep their rule, and the worktree's own path is not checked.
+        // Ordinary paths keep their rule, and the worktree's own path is not
+        // checked. Whether `/repo/...` is absolute depends on the system the
+        // test runs on, so only Unix checks that the rule covers them.
         for path in [format!("{w}/src/a.rs"), format!("{w}/./src/a.rs"), format!("{w}/src/a.b.rs")] {
             let input = json!({ "file_path": path, "content": "x" });
             assert_eq!(rule_for_on("Write", &path, &input, worktree, Platform::Windows), Ok(files.clone()), "{path:?}");
-            assert!(rule_allows_on(&files, "Write", &input, worktree, Platform::Windows), "{path:?}");
+            assert_eq!(rule_allows_on(&files, "Write", &input, worktree, Platform::Windows), cfg!(unix), "{path:?}");
         }
         let short = Path::new("/Users/RUNNER~1/repo/.worktrees/fix");
         assert!(!names_another_file("/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs", short, Platform::Windows));
