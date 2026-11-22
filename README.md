@@ -44,7 +44,7 @@ xattr -dr com.apple.quarantine "/Applications/Agent Control Center.app"
 ## Quick start
 
 1. Open the app and add a project: pick a git repository.
-2. Start a session (press `n`) and give the agent a task in the terminal.
+2. Start a session (press `n`), pick the project and describe the task.
 3. When the agent asks for permission, open Approvals, read what it wants to run, then allow once, always allow or deny.
 
 ## Keyboard shortcuts
@@ -73,7 +73,7 @@ On a fresh clone, run `npm run sidecars` before `cargo build` or `cargo test`. S
 
 ## Safety and privacy
 
-- Nothing runs until you allow it. If the daemon cannot be reached, the request is denied.
+- Permission requests from Claude Code wait for your decision in the inbox. If the daemon cannot be reached, the request is denied.
 - "Always allow" is conservative and shows what a rule covers before you choose it.
 - Everything stays on your machine: no telemetry, no account, no network calls of its own. Claude Code itself talks to Anthropic as usual.
 - The daemon socket has no authentication yet. It is limited to your user (mode 0600).
@@ -82,6 +82,8 @@ The full rules, protected paths, data locations, keyboard shortcuts and known li
 
 ## Links
 
+- [How it works](docs/architecture.md)
+- [Roadmap](docs/roadmap.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Changelog](CHANGELOG.md)

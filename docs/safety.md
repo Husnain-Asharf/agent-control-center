@@ -1,23 +1,6 @@
-# Safety, privacy and details
+# Safety and privacy
 
-This page has the full rules behind Agent Control Center: how approvals work, what "Always allow" covers, where data lives, keyboard shortcuts and known limitations. The [README](../README.md) has the short version.
-
-## How it works
-
-```mermaid
-flowchart LR
-    UI["React UI (Tauri window)"] <--> Bridge["Tauri bridge"]
-    Bridge <-->|"Unix socket, mode 0600"| Accd["accd daemon"]
-    Accd -->|"PTY + git worktree"| Claude["Claude Code sessions"]
-    Claude -->|"hooks"| Hook["acc-hook"]
-    Hook -->|"permission request"| Accd
-```
-
-- `accd` is a Rust daemon. It starts the Claude Code processes in pseudo-terminals, one git worktree each, and stores projects, sessions, approvals, rules and the event log in SQLite.
-- `acc-hook` is the small binary Claude Code calls for its hooks. It forwards each hook to `accd` and prints the permission reply. If it cannot reach the daemon, the request is denied.
-- The app is a Tauri 2 + React client. It talks to `accd` through the Tauri bridge over a Unix socket. There are no TCP ports.
-
-The app starts `accd` if none is running, detached, so it outlives the window.
+This page has the full safety rules for Agent Control Center: how approvals work, what "Always allow" covers, session PATH, where data lives, keyboard shortcuts and known limitations. The [README](../README.md) has the short version.
 
 ## Session PATH and finding claude
 
@@ -25,7 +8,7 @@ Sessions use the PATH from your login shell (`$SHELL -l`), read once when the fi
 
 ## Safety model
 
-**Approvals.** A permission request from Claude Code is held by `acc-hook` until you decide. Nothing runs until you allow it. If the daemon is unreachable the request is denied, and a pending approval expires after 55 minutes.
+**Approvals.** A permission request from Claude Code is held by `acc-hook` until you decide. The request waits for your decision in the inbox. Claude Code runs some actions without asking, depending on its own permission mode (see Known limitations). If the daemon is unreachable the request is denied, and a pending approval expires after 55 minutes.
 
 **Always allow.** `Always allow in <project>` saves a rule for that project. The approval shows what the rule will cover before you choose it.
 
@@ -119,44 +102,6 @@ pkill accd
 
 `accd` removes the variables that mark a nested Claude Code session (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT` and `CLAUDE_CODE_CHILD_SESSION`) from each session's environment, so the app also works when started from a terminal inside Claude Code. It also removes a parent agent session's own channels (`CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` and `CLAUDE_CODE_CHILD_NOTES_DIR`), so that token never reaches another agent. Every other variable reaches the session.
 
-## Build and release details
-
-
-You need Rust stable 1.100 or newer, Node 23, and git.
-
-```
-npm ci
-npm run tauri dev
-```
-
-`npm run tauri dev` runs `npm run sidecars` and builds `accd` and `acc-hook` first (`beforeDevCommand`). An `accd` that is already running keeps serving, even one from an older build. After you change the daemon or the hook, run `pkill accd` and start the app again.
-
-To make a release bundle:
-
-```
-npm run tauri build
-```
-
-Its `beforeBuildCommand` runs `npm run sidecars && npm run build`. `npm run sidecars` builds `accd` and `acc-hook` in release mode and copies them to `src-tauri/binaries/` as `accd-<target-triple>` and `acc-hook-<target-triple>`. They are bundled through `bundle.externalBin` and end up next to the app binary in `Contents/MacOS/`.
-
-### Testing
-
-```
-npm ci
-npm run sidecars          # once on a fresh clone, before any cargo command
-npm test
-npm run build
-cargo test --workspace
-```
-
-`tauri-build` needs the bundled binaries in `src-tauri/binaries/`, so `npm run sidecars` must run once before `cargo build` or `cargo test`. `npm run tauri dev` does it for you. CI runs it before the cargo tests.
-
-`node scripts/smoke.mjs` is an end-to-end check against real Claude Code. It uses your Claude Code usage. `node scripts/smoke.mjs --fake` checks the plumbing without Claude. See [testing.md](testing.md).
-
-### Releasing
-
-Maintainers: bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](../CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-latest` (the Intel build is cross-compiled) and creates a draft GitHub release. Edit the notes and publish it. The first tagged release is the first real run of the workflow. Before it, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions).
-
 ## Known limitations
 
 - Unsigned builds. See the README for how to open them.
@@ -178,14 +123,3 @@ Maintainers: bump the version in `package.json`, `src-tauri/tauri.conf.json` and
 - Worktrees and their `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
 - A worktree starts from the repo's `HEAD`, so uncommitted changes in your checkout are not in it.
 - Local only: one machine, no remote hosts. macOS only.
-
-## Roadmap
-
-Plans, not promises:
-
-- Authentication on the daemon socket.
-- A review screen: diff per agent, approve or reject per file, then commit.
-- A policy editor for rules and protected paths.
-- Sandbox settings for Claude Code.
-- More agents, such as Codex and Gemini CLI, with honest per-agent capability flags.
-- Linux and Windows builds.

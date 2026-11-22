@@ -16,6 +16,8 @@ npm run tauri dev
 
 `tauri-build` needs the bundled binaries, so `npm run sidecars` must run once on a fresh clone before `cargo build` or `cargo test`. `npm run tauri dev` runs it itself and builds `accd` and `acc-hook` first. A running `accd` keeps serving, even one from an older build. After you change the daemon or the hook, run `pkill accd` and start the app again.
 
+To make a release bundle, run `npm run tauri build`. Its `beforeBuildCommand` runs `npm run sidecars && npm run build`. `npm run sidecars` builds `accd` and `acc-hook` in release mode and copies them to `src-tauri/binaries/` as `accd-<target-triple>` and `acc-hook-<target-triple>`. They are bundled through `bundle.externalBin` and end up next to the app binary in `Contents/MacOS/`.
+
 ## Project layout
 
 - `crates/accd`: the daemon. Sessions, PTYs, worktrees, approvals, rules, SQLite, the socket server.
@@ -70,7 +72,9 @@ Add a body only when the reason is not clear from the diff.
 
 ## Maintainers
 
-Before the first release, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions). Both macOS builds run on `macos-latest`; the Intel build is cross-compiled. The first tagged release is the first real run of the workflow.
+To release, bump the version in `package.json`, `src-tauri/tauri.conf.json` and the Cargo manifests, add a [CHANGELOG.md](CHANGELOG.md) entry, commit, tag `vX.Y.Z` and push the tag. The release workflow builds both `.dmg` files on `macos-latest` (the Intel build is cross-compiled) and creates a draft GitHub release. Edit the notes and publish it.
+
+Before the first release, enable Actions and allow the workflow token write access (Settings, Actions, General, Workflow permissions). The first tagged release is the first real run of the workflow.
 
 Upload `docs/images/social-preview.png` as the repository social preview (Settings, General, Social preview), and enable private vulnerability reporting (Settings, Code security).
 
