@@ -33,6 +33,7 @@ beforeEach(() => {
 describe('wantsText', () => {
   it('names the kind of request', () => {
     expect(wantsText('Bash')).toBe('Wants to run a command');
+    expect(wantsText('PowerShell')).toBe('Wants to run a command');
     expect(wantsText('Edit')).toBe('Wants to edit a file');
     expect(wantsText('Write')).toBe('Wants to edit a file');
     expect(wantsText('WebFetch')).toBe('Wants to use WebFetch');
@@ -42,6 +43,7 @@ describe('wantsText', () => {
 describe('wantsVerb', () => {
   it('uses run only for commands', () => {
     expect(wantsVerb('Bash')).toBe('run');
+    expect(wantsVerb('PowerShell')).toBe('run');
     expect(wantsVerb('Edit')).toBe('edit');
     expect(wantsVerb('MultiEdit')).toBe('edit');
     expect(wantsVerb('Write')).toBe('edit');

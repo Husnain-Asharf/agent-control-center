@@ -8,17 +8,19 @@ import { errorText } from './errorText';
 import type { Approval, Decision } from './types';
 
 const EDIT_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit'];
+/** The shell tools: Bash, and PowerShell, which Claude Code also has on Windows. */
+const SHELL_TOOLS = ['Bash', 'PowerShell'];
 
 /** The headline for a request, by tool. */
 export function wantsText(tool: string): string {
-  if (tool === 'Bash') return 'Wants to run a command';
+  if (SHELL_TOOLS.includes(tool)) return 'Wants to run a command';
   if (EDIT_TOOLS.includes(tool)) return 'Wants to edit a file';
   return `Wants to use ${tool}`;
 }
 
 /** The short form used in the dock and toasts: `run`, `edit` or `use <tool>`. */
 export function wantsVerb(tool: string): string {
-  if (tool === 'Bash') return 'run';
+  if (SHELL_TOOLS.includes(tool)) return 'run';
   if (EDIT_TOOLS.includes(tool)) return 'edit';
   return `use ${tool}`;
 }
