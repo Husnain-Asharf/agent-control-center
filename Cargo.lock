@@ -21,6 +21,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "acc-transport"
+version = "0.2.0"
+dependencies = [
+ "acc-protocol",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "accd"
 version = "0.2.0"
 dependencies = [

@@ -164,16 +164,37 @@ pub fn permission_reply(allow: bool, message: Option<&str>) -> String {
     serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}).to_string()
 }
 
+/// `env_value` (`$ACC_DATA_DIR`) if set, else `AgentControlCenter` in the
+/// platform's data folder: `~/Library/Application Support` on macOS,
+/// `~/.local/share` on Linux and `%LOCALAPPDATA%` on Windows, which stays on
+/// this machine (the roaming one is copied between machines).
 pub fn data_dir_from(env_value: Option<OsString>) -> PathBuf {
+    let base = if cfg!(windows) { dirs::data_local_dir() } else { dirs::data_dir() };
     match env_value {
         Some(v) => PathBuf::from(v),
-        None => dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("AgentControlCenter"),
+        None => base.unwrap_or_else(std::env::temp_dir).join("AgentControlCenter"),
     }
 }
 
 pub fn data_dir() -> PathBuf { data_dir_from(std::env::var_os("ACC_DATA_DIR")) }
 
+/// Where the daemon serving `data_dir` listens: `accd.sock` in it, a Unix
+/// socket.
+#[cfg(unix)]
 pub fn socket_path(data_dir: &Path) -> PathBuf { data_dir.join("accd.sock") }
+
+/// Where the daemon serving `data_dir` listens: a named pipe whose name is
+/// made from the data dir, so each data dir has its own. Windows ignores case
+/// and takes either slash in a path, so the name does too.
+#[cfg(windows)]
+pub fn socket_path(data_dir: &Path) -> PathBuf {
+    let dir = data_dir.to_string_lossy().replace('/', "\\").to_lowercase();
+    // FNV-1a, which gives the same name in every build.
+    let hash = dir.trim_end_matches('\\').bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    PathBuf::from(format!(r"\\.\pipe\agent-control-center-{hash:016x}"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -197,7 +218,26 @@ mod tests {
     #[test] fn data_dir_prefers_env_value() {
         assert_eq!(data_dir_from(Some("/tmp/acc test".into())), PathBuf::from("/tmp/acc test"));
         assert!(data_dir_from(None).ends_with("AgentControlCenter"));
+    }
+    #[cfg(unix)]
+    #[test] fn socket_is_in_the_data_dir() {
         assert_eq!(socket_path(Path::new("/d")), PathBuf::from("/d/accd.sock"));
+    }
+    #[cfg(windows)]
+    #[test] fn data_dir_is_in_local_app_data() {
+        assert_eq!(data_dir_from(None), dirs::data_local_dir().unwrap().join("AgentControlCenter"));
+    }
+    #[cfg(windows)]
+    #[test] fn each_data_dir_has_its_own_pipe() {
+        let pipe = socket_path(Path::new(r"C:\Users\x\AppData\Local\AgentControlCenter"));
+        let name = pipe.to_str().unwrap();
+        assert!(name.starts_with(r"\\.\pipe\agent-control-center-"), "{name}");
+        assert_eq!(name.len(), r"\\.\pipe\agent-control-center-".len() + 16, "{name}");
+        // The same folder written another way is the same pipe.
+        for same in [r"c:\users\x\appdata\local\agentcontrolcenter", "C:/Users/x/AppData/Local/AgentControlCenter/"] {
+            assert_eq!(socket_path(Path::new(same)), pipe, "{same}");
+        }
+        assert_ne!(socket_path(Path::new(r"C:\Users\y\AppData\Local\AgentControlCenter")), pipe);
     }
     #[test] fn approval_carries_protected_and_rule_preview() {
         let a = Approval {

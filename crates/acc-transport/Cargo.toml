@@ -1,0 +1,26 @@
+[package]
+name = "acc-transport"
+version.workspace = true
+description = "Local connection between the Agent Control Center daemon, hook and app: a Unix socket, or a named pipe on Windows"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { version = "1.54", features = ["net", "io-util", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+acc-protocol = { path = "../acc-protocol" }
+tempfile = "3.27"
+tokio = { version = "1.54", features = ["full"] }
