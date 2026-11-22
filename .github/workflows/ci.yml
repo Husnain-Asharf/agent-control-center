@@ -1,0 +1,34 @@
+# Pinned action versions should be kept current. Dependabot proposes bumps.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 23
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm test
+      # The Tauri crate needs dist/ to exist.
+      - run: npm run build
+      # tauri-build needs the externalBin sidecars to exist.
+      - run: npm run sidecars
+      - run: cargo test --workspace

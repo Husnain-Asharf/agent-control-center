@@ -1,0 +1,13 @@
+[package]
+name = "acc-protocol"
+version.workspace = true
+description = "Shared wire protocol and paths for the Agent Control Center daemon, hook and app"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+dirs = "7.0"

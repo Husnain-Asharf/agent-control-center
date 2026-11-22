@@ -1,0 +1,52 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Agent Control Center",
+  "version": "0.1.0",
+  "identifier": "com.agentcontrolcenter.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run sidecars && cargo build -p accd -p acc-hook && npm run dev",
+    "beforeBuildCommand": "npm run sidecars && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent Control Center",
+        "width": 1440,
+        "height": 900,
+        "resizable": true,
+        "fullscreen": false,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Supervise Claude Code sessions",
+    "longDescription": "Agent Control Center runs and supervises Claude Code sessions in git worktrees, with tool-call approvals, from one macOS window.",
+    "copyright": "Copyright (c) 2026 Agent Control Center contributors",
+    "externalBin": [
+      "binaries/accd",
+      "binaries/acc-hook"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

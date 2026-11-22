@@ -1,0 +1,519 @@
+//! The Unix socket server. Newline-delimited JSON, one task per connection.
+//! An app connection that says hello receives every daemon event; a hook
+//! connection gets exactly one response. PTY output is coalesced here.
+
+use crate::claude::{self, HookEffect};
+use crate::daemon::{ApiError, ApprovalOutcome, Daemon, DaemonConfig, Decided, Shared};
+use crate::pty;
+use acc_protocol::{
+    encode_line, permission_reply, ClientKind, DaemonEvent, Decision, HookReply, Request, RequestEnvelope, ServerMsg,
+    PROTOCOL_VERSION,
+};
+use anyhow::Context;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{broadcast, oneshot, Notify};
+use tokio::task::{JoinHandle, JoinSet};
+
+pub const APPROVAL_EXPIRED: &str = "No decision in Agent Control Center within 55 minutes.";
+pub const APPROVAL_DENIED: &str = "Denied in Agent Control Center.";
+
+/// Events an app client may fall behind by before it is closed.
+const EVENT_CAPACITY: usize = 4096;
+/// A session's output is broadcast at most this often.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+/// How long shutdown waits for the killed agents to exit.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
+/// How long `run_server` keeps trying the data dir's lock.
+const LOCK_WAIT: Duration = Duration::from_millis(500);
+
+/// `run_server` fails with this when another daemon already serves the data dir.
+#[derive(Debug, thiserror::Error)]
+#[error("accd already running")]
+pub struct AlreadyRunning;
+
+pub struct ServerHandle {
+    stop: oneshot::Sender<()>,
+    accept: JoinHandle<()>,
+    shared: Arc<Shared>,
+    /// The data dir's lock, held until shutdown or drop.
+    _lock: File,
+}
+
+/// Opens the store, marks sessions left by a previous daemon as Stopped,
+/// binds the socket (user-only) and starts serving. Fails with
+/// [`AlreadyRunning`] when another daemon serves the same data dir.
+pub async fn run_server(cfg: DaemonConfig) -> anyhow::Result<ServerHandle> {
+    cfg.paths.create_dirs().with_context(|| format!("create {}", cfg.paths.data.display()))?;
+    // Taken before anything else is touched, so a second daemon can neither
+    // mark the first one's sessions Stopped nor unlink its socket.
+    let lock = lock_data_dir(&cfg.paths.lock).await?;
+    let (events, _) = broadcast::channel(EVENT_CAPACITY);
+    let daemon = Daemon::open(&cfg.paths, events.clone()).context("open the store")?;
+    let socket = &cfg.paths.socket;
+    // With the lock held, a socket file can only be left by a daemon that went away.
+    let _ = std::fs::remove_file(socket);
+    let listener = UnixListener::bind(socket).with_context(|| format!("bind {}", socket.display()))?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    let shared = Arc::new(Shared::new(cfg, events, daemon));
+    let (stop, stopped) = oneshot::channel();
+    let accept = tokio::spawn(accept_loop(listener, shared.clone(), stopped));
+    Ok(ServerHandle { stop, accept, shared, _lock: lock })
+}
+
+/// Takes the data dir's lock, an exclusive non-blocking flock. It lasts while
+/// the returned file is open. Files are opened close-on-exec, so the agents
+/// and git do not keep it. A process that is between fork and exec does
+/// share it, though, so a lock that was just released can look held for a
+/// moment. The attempt is therefore repeated for up to [`LOCK_WAIT`].
+async fn lock_data_dir(path: &Path) -> anyhow::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let deadline = tokio::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(TryLockError::WouldBlock) => return Err(AlreadyRunning.into()),
+            Err(TryLockError::Error(e)) => return Err(anyhow::Error::new(e).context(format!("lock {}", path.display()))),
+        }
+    }
+}
+
+impl ServerHandle {
+    /// Stops accepting, closes every connection and kills every running
+    /// agent without recording the exits, as if the daemon went away. The
+    /// next `run_server` on the same dir marks those sessions Stopped.
+    /// Returns once the agents have exited.
+    pub async fn shutdown(self) {
+        let _ = self.stop.send(());
+        let _ = self.accept.await;
+        let pumps = self.shared.state.lock().await.kill_all();
+        let deadline = tokio::time::Instant::now() + EXIT_WAIT;
+        for pump in pumps {
+            let _ = tokio::time::timeout_at(deadline, pump).await;
+        }
+    }
+}
+
+async fn accept_loop(listener: UnixListener, shared: Arc<Shared>, mut stopped: oneshot::Receiver<()>) {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = &mut stopped => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(serve(stream, shared.clone()));
+                }
+                Err(e) => {
+                    eprintln!("accd: accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+            // Reap finished connections so the set does not grow.
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+    // Dropping a connection task closes its socket and writes nothing to the
+    // store, so a pending approval stays pending for the next daemon.
+    connections.shutdown().await;
+}
+
+enum Outcome {
+    Reply(ServerMsg),
+    /// Reply, then close the connection.
+    Last(ServerMsg),
+    Close,
+}
+
+async fn serve(stream: UnixStream, shared: Arc<Shared>) {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut subscription = None;
+    let mut line = Vec::new();
+    loop {
+        let read = tokio::select! {
+            // read_until keeps partial input in `line` when the other branch wins.
+            read = reader.read_until(b'\n', &mut line) => read,
+            event = next_event(&mut subscription) => {
+                match event {
+                    Ok(event) => {
+                        if send(&mut writer, &ServerMsg::Event { event }).await.is_err() {
+                            return;
+                        }
+                    }
+                    // A client that lags is closed. It reconnects and re-reads the snapshot.
+                    Err(_) => return,
+                }
+                continue;
+            }
+        };
+        if !matches!(read, Ok(n) if n > 0) {
+            return;
+        }
+        let request = std::mem::take(&mut line);
+        if request.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match handle_line(&shared, &request, &mut subscription, &mut reader).await {
+            Outcome::Reply(msg) => {
+                if send(&mut writer, &msg).await.is_err() {
+                    return;
+                }
+            }
+            Outcome::Last(msg) => {
+                let _ = send(&mut writer, &msg).await;
+                return;
+            }
+            Outcome::Close => return,
+        }
+    }
+}
+
+async fn next_event(subscription: &mut Option<broadcast::Receiver<DaemonEvent>>) -> Result<DaemonEvent, broadcast::error::RecvError> {
+    match subscription {
+        Some(events) => events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn send(writer: &mut OwnedWriteHalf, msg: &ServerMsg) -> std::io::Result<()> {
+    writer.write_all(&encode_line(msg)).await
+}
+
+async fn handle_line(
+    shared: &Arc<Shared>,
+    line: &[u8],
+    subscription: &mut Option<broadcast::Receiver<DaemonEvent>>,
+    conn: &mut BufReader<OwnedReadHalf>,
+) -> Outcome {
+    let envelope: RequestEnvelope = match serde_json::from_slice(line) {
+        Ok(envelope) => envelope,
+        Err(e) => return Outcome::Reply(error(request_id(line), ApiError::bad_request(format!("Bad request: {e}")))),
+    };
+    let id = envelope.id;
+    match envelope.request {
+        // acc-hook sends one request without hello and reads one line.
+        Request::Hook { session_id, payload } => match hook(shared, &session_id, &payload, conn).await {
+            Some(reply) => Outcome::Last(ServerMsg::Response { id, result: to_json(&reply) }),
+            None => Outcome::Close,
+        },
+        request => match dispatch(shared, request, subscription).await {
+            Ok(result) => Outcome::Reply(ServerMsg::Response { id, result }),
+            Err(e) => Outcome::Reply(error(id, e)),
+        },
+    }
+}
+
+/// The id of a request that did not parse, if it has one.
+fn request_id(line: &[u8]) -> u64 {
+    serde_json::from_slice::<Value>(line).ok().and_then(|v| v.get("id")?.as_u64()).unwrap_or(0)
+}
+
+fn error(id: u64, e: ApiError) -> ServerMsg {
+    ServerMsg::Error { id, code: e.code.to_string(), message: e.message }
+}
+
+fn to_json<T: Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).expect("protocol types serialize")
+}
+
+async fn dispatch(
+    shared: &Arc<Shared>,
+    request: Request,
+    subscription: &mut Option<broadcast::Receiver<DaemonEvent>>,
+) -> Result<Value, ApiError> {
+    Ok(match request {
+        Request::Hello { client, version } => {
+            if version != PROTOCOL_VERSION {
+                return Err(ApiError::bad_request(format!(
+                    "Protocol version {version} is not supported. This daemon speaks version {PROTOCOL_VERSION}."
+                )));
+            }
+            if client == ClientKind::App && subscription.is_none() {
+                *subscription = Some(shared.events.subscribe());
+            }
+            json!({ "version": PROTOCOL_VERSION })
+        }
+        Request::Snapshot => to_json(&shared.state.lock().await.snapshot()),
+        Request::ProjectAdd { path } => to_json(&shared.project_add(&path).await?),
+        Request::SessionStart { project_id, agent, task } => to_json(&shared.session_start(&project_id, &agent, &task).await?),
+        Request::SessionInput { session_id, data_b64 } => {
+            let data = B64.decode(data_b64).map_err(|e| ApiError::bad_request(format!("data_b64 is not base64: {e}")))?;
+            shared.state.lock().await.queue_input(&session_id, data)?;
+            json!({})
+        }
+        Request::SessionResize { session_id, cols, rows } => {
+            shared.session_resize(&session_id, cols, rows).await?;
+            json!({})
+        }
+        Request::SessionAttach { session_id } => {
+            let (scrollback, end) = shared.state.lock().await.scrollback(&session_id)?;
+            json!({ "scrollback_b64": B64.encode(scrollback), "end": end })
+        }
+        Request::SessionStop { session_id } => to_json(&shared.state.lock().await.stop_session(&session_id)?),
+        Request::SessionRestart { session_id } => to_json(&shared.session_restart(&session_id).await?),
+        Request::ApprovalDecide { approval_id, decision } => match shared.state.lock().await.decide(&approval_id, decision)? {
+            Decided::Resolved(approval) => to_json(&approval),
+            Decided::AlreadyResolved => json!({ "already_resolved": true }),
+        },
+        Request::EventsList { session_id, limit } => to_json(&shared.state.lock().await.events(session_id.as_deref(), limit)?),
+        Request::Hook { .. } => return Err(ApiError::internal("hook requests are served by handle_line")),
+    })
+}
+
+enum Waited {
+    Decided(Result<Decision, oneshot::error::RecvError>),
+    Expired,
+    HookClosed,
+}
+
+/// Serves one hook call. `None` closes the connection without a reply,
+/// because the hook went away or the daemon is going away.
+async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut BufReader<OwnedReadHalf>) -> Option<HookReply> {
+    let silent = HookReply { stdout: None, exit_code: 0 };
+    let (tool, summary, input) = match claude::interpret_hook(payload) {
+        HookEffect::Approval { tool, summary, input } => (tool, summary, input),
+        HookEffect::Status(status) => {
+            shared.state.lock().await.hook_status(session_id, status);
+            return Some(silent);
+        }
+        HookEffect::Activity(summary) => {
+            let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or("unknown");
+            shared.state.lock().await.tool_used(session_id, tool, &summary);
+            return Some(silent);
+        }
+        HookEffect::Nothing => return Some(silent),
+    };
+    let outcome = shared.state.lock().await.request_approval(session_id, tool, summary, input);
+    let (approval_id, mut decision) = match outcome {
+        ApprovalOutcome::Ignored => return Some(silent),
+        ApprovalOutcome::Allowed => return Some(permission(true, None)),
+        ApprovalOutcome::Pending { id, decision } => (id, decision),
+    };
+    // Wait without holding the state lock.
+    let waited = tokio::select! {
+        decided = &mut decision => Waited::Decided(decided),
+        _ = tokio::time::sleep(shared.cfg.approval_timeout) => Waited::Expired,
+        _ = wait_closed(conn) => Waited::HookClosed,
+    };
+    match waited {
+        Waited::Decided(decided) => decided.ok().map(decision_reply),
+        Waited::Expired => {
+            if shared.state.lock().await.expire(&approval_id) {
+                Some(permission(false, Some(APPROVAL_EXPIRED)))
+            } else {
+                // A decision landed just before the timer fired.
+                decision.try_recv().ok().map(decision_reply)
+            }
+        }
+        Waited::HookClosed => {
+            shared.state.lock().await.cancel(&approval_id);
+            None
+        }
+    }
+}
+
+/// Resolves once the peer closed its end. A hook sends nothing after its request.
+async fn wait_closed(conn: &mut BufReader<OwnedReadHalf>) {
+    let mut buf = [0u8; 512];
+    while matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {}
+}
+
+fn permission(allow: bool, message: Option<&str>) -> HookReply {
+    HookReply { stdout: Some(permission_reply(allow, message)), exit_code: 0 }
+}
+
+fn decision_reply(decision: Decision) -> HookReply {
+    match decision {
+        Decision::AllowOnce | Decision::AllowAlways => permission(true, None),
+        Decision::Deny => permission(false, Some(APPROVAL_DENIED)),
+    }
+}
+
+/// A session's output waiting to be broadcast. The PTY reader thread fills it.
+#[derive(Default)]
+pub(crate) struct OutputBuffer {
+    pending: std::sync::Mutex<Pending>,
+    ready: Notify,
+}
+
+#[derive(Default)]
+struct Pending {
+    bytes: Vec<u8>,
+    /// Stream position just after the last pending byte.
+    end: u64,
+}
+
+impl OutputBuffer {
+    /// Adds a chunk that starts at stream position `offset`. Chunks arrive in
+    /// order and contiguous. Keeps at most the scrollback cap, so a flood
+    /// cannot grow memory without bound.
+    pub(crate) fn push(&self, chunk: &[u8], offset: u64) {
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pty::append_capped(&mut pending.bytes, chunk);
+            pending.end = offset + chunk.len() as u64;
+        }
+        self.ready.notify_one();
+    }
+
+    /// The pending bytes and the stream position of the first one. That is
+    /// the first chunk's offset, unless the cap dropped older bytes.
+    fn take(&self) -> (Vec<u8>, u64) {
+        let mut pending = self.pending.lock().unwrap();
+        let bytes = std::mem::take(&mut pending.bytes);
+        let offset = pending.end - bytes.len() as u64;
+        (bytes, offset)
+    }
+}
+
+/// Broadcasts the session's output as one `SessionOutput` at most every
+/// [`FLUSH_INTERVAL`]. When the agent exits, flushes the rest and then
+/// records the exit, so the last output reaches clients first.
+pub(crate) fn spawn_output_pump(
+    shared: Arc<Shared>,
+    session_id: String,
+    output: Arc<OutputBuffer>,
+    mut exited: oneshot::Receiver<Option<i32>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let code = loop {
+            tokio::select! {
+                biased;
+                // The exit is polled first, so output that never stops (a
+                // leftover background job) cannot keep a finished run open.
+                code = &mut exited => break code.ok().flatten(),
+                _ = output.ready.notified() => {
+                    flush(&shared.events, &session_id, &output);
+                    tokio::time::sleep(FLUSH_INTERVAL).await;
+                }
+            }
+        };
+        flush(&shared.events, &session_id, &output);
+        shared.state.lock().await.pty_exited(&session_id, code);
+    })
+}
+
+fn flush(events: &broadcast::Sender<DaemonEvent>, session_id: &str, output: &OutputBuffer) {
+    let (data, offset) = output.take();
+    if !data.is_empty() {
+        let event = DaemonEvent::SessionOutput { session_id: session_id.to_string(), data_b64: B64.encode(data), offset };
+        let _ = events.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    /// Daemon state on a temp dir, and a receiver for its events.
+    fn shared() -> (tempfile::TempDir, Arc<Shared>, broadcast::Receiver<DaemonEvent>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::in_dir(dir.path());
+        let (events, rx) = broadcast::channel(EVENT_CAPACITY);
+        let daemon = Daemon::open(&paths, events.clone()).unwrap();
+        let mut cfg = DaemonConfig::new(paths, "/bin/true".into());
+        cfg.login_shell = None;
+        (dir, Arc::new(Shared::new(cfg, events, daemon)), rx)
+    }
+
+    #[tokio::test]
+    async fn exit_is_not_held_back_by_output() {
+        let (_dir, shared, _rx) = shared();
+        let output = Arc::new(OutputBuffer::default());
+        let (exit_tx, exited) = oneshot::channel();
+        let pump = spawn_output_pump(shared, "s1".into(), output.clone(), exited);
+
+        // Like a background job that keeps writing after the agent exited.
+        let writing = Arc::new(AtomicBool::new(true));
+        let still_writing = writing.clone();
+        let writer = std::thread::spawn(move || {
+            let mut offset = 0;
+            while still_writing.load(Ordering::SeqCst) {
+                output.push(b"x\n", offset);
+                offset += 2;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        exit_tx.send(Some(0)).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(1), pump).await;
+        writing.store(false, Ordering::SeqCst);
+        tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
+        assert!(ended.is_ok(), "the exit waited for the output to stop");
+    }
+
+    #[tokio::test]
+    async fn output_is_flushed_at_most_every_16_ms() {
+        let (_dir, shared, mut rx) = shared();
+        let output = Arc::new(OutputBuffer::default());
+        let (exit_tx, exited) = oneshot::channel();
+        let pump = spawn_output_pump(shared, "s1".into(), output.clone(), exited);
+
+        // Like the PTY reader thread: many small chunks for 200 ms.
+        let writer = std::thread::spawn(move || {
+            let start = Instant::now();
+            let mut n = 0;
+            let mut offset = 0;
+            while start.elapsed() < Duration::from_millis(200) {
+                let chunk = format!("{n}\n");
+                output.push(chunk.as_bytes(), offset);
+                offset += chunk.len() as u64;
+                n += 1;
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            (n, start.elapsed())
+        });
+        let (pushes, took) = tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
+        exit_tx.send(Some(0)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pump).await.unwrap().unwrap();
+
+        let mut flushes = 0;
+        let mut data = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let DaemonEvent::SessionOutput { data_b64, offset, .. } = event {
+                assert_eq!(offset, data.len() as u64, "each flush starts where the last one ended");
+                flushes += 1;
+                data.extend(B64.decode(data_b64).unwrap());
+            }
+        }
+        let most = took.as_millis() as usize / 16 + 2;
+        assert!(flushes <= most, "{flushes} flushes for {pushes} chunks in {took:?}");
+        let expected: String = (0..pushes).map(|n| format!("{n}\n")).collect();
+        assert_eq!(String::from_utf8(data).unwrap(), expected, "every chunk, in order");
+    }
+
+    #[test]
+    fn flushed_offset_is_the_first_pending_byte() {
+        let output = OutputBuffer::default();
+        output.push(b"abc", 7);
+        output.push(b"de", 10);
+        assert_eq!(output.take(), (b"abcde".to_vec(), 7));
+        // A flood past the cap drops the oldest bytes, and the offset moves with them.
+        output.push(&vec![b'x'; pty::SCROLLBACK_CAP + 10], 12);
+        let (bytes, offset) = output.take();
+        assert_eq!((bytes.len(), offset), (pty::SCROLLBACK_CAP, 22));
+    }
+}

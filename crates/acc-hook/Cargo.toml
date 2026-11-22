@@ -1,0 +1,15 @@
+[package]
+name = "acc-hook"
+version.workspace = true
+description = "Claude Code hook binary that forwards tool-call approvals to accd"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+acc-protocol = { path = "../acc-protocol" }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.27"

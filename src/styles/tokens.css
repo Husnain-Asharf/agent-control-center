@@ -1,0 +1,45 @@
+/* Design notes
+   Dark cockpit: the interface stays grey while things are normal. Color appears only
+   for agent state, so one glance tells you whether anything needs you.
+   amber = needs you, red = failed, green = done, cyan = working.
+   Matte panels hold controls. Recessed wells hold live output (timeline, terminal, diffs).
+   Raised surfaces catch a faint top light; wells sit slightly recessed.
+   Type: Geist for the UI, Geist Mono for code and the terminal. */
+:root {
+  --font-ui: "Geist", "SF Pro Text", system-ui, sans-serif;
+  --font-code: "Geist Mono", ui-monospace, Menlo, monospace;
+  --r-sm: 5px; --r-md: 7px; --r-lg: 12px;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+:root, :root[data-theme="dark"] {
+  --chrome: #101417; --panel: #13181C; --raised: #1A2025; --hover: #20272D;
+  --well: #0A0D10; --well-hover: #0F1317;
+  --line: rgba(255,255,255,.075); --line-strong: rgba(255,255,255,.13); --line-faint: rgba(255,255,255,.045); --grid: rgba(255,255,255,.04);
+  --ink: #E8ECEF; --ink-2: #A3AEB6; --ink-3: #7F8B94;
+  --paper: #F2EFE6; --paper-ink: #12171B;
+  --hi: rgba(255,255,255,.055); --inset: inset 0 1px 2px rgba(0,0,0,.5);
+  --amber: #F0A43A; --amber-text: #F0A43A; --amber-soft: rgba(240,164,58,.13);
+  --red: #EE6A5F; --red-text: #EE6A5F; --red-soft: rgba(238,106,95,.13);
+  --green: #52C28B; --green-text: #52C28B; --green-soft: rgba(82,194,139,.12);
+  --cyan: #63B4E6; --cyan-text: #63B4E6;
+  --term-fg: #C7D0D6; --term-dim: #7E8A93; --term-user: #E9E3CF; --term-path: #E5EAED; --term-cmd: #DCCB98;
+  --add-bg: rgba(82,194,139,.10); --del-bg: rgba(238,106,95,.10); --hunk-bg: rgba(255,255,255,.03);
+  --scrim: rgba(6,9,12,.55); --shadow: 0 16px 48px rgba(0,0,0,.5);
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --chrome: #EBEEF0; --panel: #F4F6F7; --raised: #FFFFFF; --hover: #E9ECEF;
+  --well: #FFFFFF; --well-hover: #F6F8F9;
+  --line: rgba(16,24,32,.09); --line-strong: rgba(16,24,32,.16); --line-faint: rgba(16,24,32,.05); --grid: rgba(16,24,32,.05);
+  --ink: #141C22; --ink-2: #47535D; --ink-3: #5B6771;
+  --paper: #182129; --paper-ink: #F5F7F8;
+  --hi: rgba(255,255,255,.7); --inset: inset 0 1px 2px rgba(16,24,32,.07);
+  --amber: #E0921F; --amber-text: #8F5200; --amber-soft: rgba(224,146,31,.15);
+  --red: #D9483B; --red-text: #B3342A; --red-soft: rgba(217,72,59,.12);
+  --green: #2FA36B; --green-text: #187046; --green-soft: rgba(47,163,107,.12);
+  --cyan: #2E8BC9; --cyan-text: #1D6A9C;
+  --term-fg: #24313A; --term-dim: #5F6B75; --term-user: #6B5A2E; --term-path: #111A20; --term-cmd: #6A5A1F;
+  --add-bg: rgba(47,163,107,.12); --del-bg: rgba(217,72,59,.10); --hunk-bg: rgba(0,0,0,.03);
+  --scrim: rgba(30,38,44,.28); --shadow: 0 16px 48px rgba(20,30,40,.18);
+  color-scheme: light;
+}
