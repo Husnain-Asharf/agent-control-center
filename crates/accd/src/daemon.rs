@@ -175,14 +175,14 @@ pub struct DaemonConfig {
     /// on the login shell's PATH and in the usual install folders.
     pub claude_bin: Option<PathBuf>,
     /// The login shell asked for the PATH the agents get and `claude` is
-    /// searched on, so an app opened from Finder finds what a terminal
-    /// would. It is asked once, when the first session starts. `None` asks no
-    /// shell, and the agents keep the daemon's PATH.
+    /// searched on, so an app opened from Finder or a Linux desktop finds
+    /// what a terminal would. It is asked once, when the first session
+    /// starts. `None` asks no shell, and the agents keep the daemon's PATH.
     pub login_shell: Option<PathBuf>,
 }
 
 impl DaemonConfig {
-    /// A config with the user's login shell (`$SHELL`, else `/bin/zsh`).
+    /// A config with the user's login shell (`$SHELL`, else zsh, bash or sh).
     pub fn new(paths: Paths, hook_bin: PathBuf) -> DaemonConfig {
         let login_shell = Some(session_path::login_shell());
         DaemonConfig { paths, hook_bin, approval_timeout: DEFAULT_APPROVAL_TIMEOUT, claude_bin: None, login_shell }

@@ -1,9 +1,12 @@
 //! The PATH agent sessions get. An app opened from Finder gives the daemon
-//! launchd's PATH, `/usr/bin:/bin:/usr/sbin:/sbin`, so Claude Code and the
-//! commands it runs would not find Homebrew, nvm and the like. The daemon
-//! asks the user's login shell for its PATH, once, and adds the folders of
-//! its own PATH that the login PATH lacks.
+//! launchd's PATH, `/usr/bin:/bin:/usr/sbin:/sbin`, and one opened from a
+//! Linux desktop gets the desktop session's, which lacks what only the
+//! shell's startup files add. So Claude Code and the commands it runs would
+//! not find Homebrew, nvm and the like. The daemon asks the user's login
+//! shell for its PATH, once, and adds the folders of its own PATH that the
+//! login PATH lacks.
 
+use crate::claude::is_executable;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -22,13 +25,23 @@ const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// Homebrew's folders on Apple Silicon and on Intel.
 const HOMEBREW_BINS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 
-/// The user's login shell: `$SHELL`, else `/bin/zsh`, the macOS default.
+/// The shells tried, in order, when `$SHELL` is unset: zsh is the macOS
+/// default, bash the usual one on Linux, and sh is always there.
+const DEFAULT_SHELLS: [&str; 3] = ["/bin/zsh", "/bin/bash", "/bin/sh"];
+
+/// The user's login shell: `$SHELL`, else the first of [`DEFAULT_SHELLS`]
+/// that is an executable file.
 pub fn login_shell() -> PathBuf {
-    shell_or_default(std::env::var_os("SHELL"))
+    shell_or_default(std::env::var_os("SHELL"), is_executable)
 }
 
-fn shell_or_default(shell: Option<OsString>) -> PathBuf {
-    shell.filter(|shell| !shell.is_empty()).map_or_else(|| PathBuf::from("/bin/zsh"), PathBuf::from)
+fn shell_or_default(shell: Option<OsString>, is_executable: impl Fn(&Path) -> bool) -> PathBuf {
+    if let Some(shell) = shell.filter(|shell| !shell.is_empty()) {
+        return PathBuf::from(shell);
+    }
+    let last = DEFAULT_SHELLS[DEFAULT_SHELLS.len() - 1];
+    let found = DEFAULT_SHELLS.into_iter().find(|shell| is_executable(Path::new(shell)));
+    PathBuf::from(found.unwrap_or(last))
 }
 
 /// The PATH of `shell` as a login shell, or `None` when it cannot be read or
@@ -182,12 +195,22 @@ mod tests {
     /// A stand-in for a login shell. It gets `-l -c <command>`, so the command
     /// is `$3`. It has run once already: macOS checks a new executable the
     /// first time it runs, which can take longer than a test's timeout when
-    /// many tests start new scripts at once.
+    /// many tests start new scripts at once. And Linux does not start a file
+    /// that is open for writing (ETXTBSY): a process another test forks while
+    /// the script is written keeps it open until that process execs.
     fn fake_shell(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(Command::new(&path).env("WARM_UP", "1").status().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match Command::new(&path).env("WARM_UP", "1").status() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                warmed_up => break assert!(warmed_up.unwrap().success()),
+            }
+        }
         path
     }
 
@@ -284,10 +307,19 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_is_shell_else_zsh() {
-        assert_eq!(shell_or_default(Some("/opt/homebrew/bin/fish".into())), PathBuf::from("/opt/homebrew/bin/fish"));
-        assert_eq!(shell_or_default(Some("".into())), PathBuf::from("/bin/zsh"));
-        assert_eq!(shell_or_default(None), PathBuf::from("/bin/zsh"));
+    fn the_shell_is_shell_else_zsh_then_bash_then_sh() {
+        let all = |_: &Path| true;
+        let only = |wanted: &'static str| move |path: &Path| path == Path::new(wanted);
+        assert_eq!(shell_or_default(Some("/opt/homebrew/bin/fish".into()), all), PathBuf::from("/opt/homebrew/bin/fish"));
+        // $SHELL unset or empty: zsh where it is there (macOS), else bash
+        // (most Linux systems), else sh.
+        assert_eq!(shell_or_default(None, all), PathBuf::from("/bin/zsh"));
+        assert_eq!(shell_or_default(Some("".into()), all), PathBuf::from("/bin/zsh"));
+        assert_eq!(shell_or_default(None, only("/bin/bash")), PathBuf::from("/bin/bash"));
+        assert_eq!(shell_or_default(Some("".into()), only("/bin/sh")), PathBuf::from("/bin/sh"));
+        assert_eq!(shell_or_default(None, |_| false), PathBuf::from("/bin/sh"));
+        // This machine has one of them.
+        assert!(is_executable(&shell_or_default(None, is_executable)));
     }
 
     #[test]

@@ -9,8 +9,9 @@ pub struct ClaudeAdapter {
 
 /// `$ACC_CLAUDE_BIN` if set and the file exists, else `claude` on the
 /// daemon's PATH, then on `search_path` (the session PATH, led by the login
-/// shell's, which an app opened from Finder does not have), then in one of
-/// the [`install_locations`]. Only an executable file counts there.
+/// shell's, which an app opened from Finder or a Linux desktop may not
+/// have), then in one of the [`install_locations`]. Only an executable file
+/// counts there.
 pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
     if let Ok(p) = std::env::var("ACC_CLAUDE_BIN") {
         let p = PathBuf::from(p);
@@ -26,10 +27,16 @@ pub fn detect(search_path: Option<&str>) -> Option<ClaudeAdapter> {
 
 /// Where Claude Code's installers put `claude`, in the order they are tried:
 /// `~/.local/bin` (the native installer), `~/.claude/local` (the older local
-/// install), then Homebrew's folders on Apple Silicon and on Intel.
+/// install), `~/.npm-global/bin` (npm with a user prefix), Homebrew's
+/// folders on Apple Silicon and on Intel (`/usr/local/bin` is also where npm
+/// with a system Node puts it on Linux), then `/usr/bin` (a distro or
+/// NodeSource Node on Linux).
 pub fn install_locations(home: Option<&Path>) -> Vec<PathBuf> {
-    let in_home = home.into_iter().flat_map(|home| [home.join(".local/bin/claude"), home.join(".claude/local/claude")]);
-    in_home.chain(["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].map(PathBuf::from)).collect()
+    let in_home = home.into_iter().flat_map(|home| {
+        [home.join(".local/bin/claude"), home.join(".claude/local/claude"), home.join(".npm-global/bin/claude")]
+    });
+    let system = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude"];
+    in_home.chain(system.map(PathBuf::from)).collect()
 }
 
 /// `claude` in a folder of `search_path` (absolute folders only), else in
@@ -266,10 +273,17 @@ mod tests {
 
     #[test]
     fn install_locations_come_in_order() {
-        let locations = ["/h/.local/bin/claude", "/h/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"];
+        let locations = [
+            "/h/.local/bin/claude",
+            "/h/.claude/local/claude",
+            "/h/.npm-global/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ];
         assert_eq!(install_locations(Some(Path::new("/h"))), locations.map(PathBuf::from));
-        // Without a home folder, only the Homebrew ones.
-        assert_eq!(install_locations(None), locations[2..].iter().map(PathBuf::from).collect::<Vec<_>>());
+        // Without a home folder, only the system ones.
+        assert_eq!(install_locations(None), locations[3..].iter().map(PathBuf::from).collect::<Vec<_>>());
     }
 
     #[test]
@@ -283,14 +297,26 @@ mod tests {
             false
         });
         assert_eq!(found, None);
-        let expected =
-            ["/a/claude", "/b/claude", "/h/.local/bin/claude", "/h/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"];
+        let expected = [
+            "/a/claude",
+            "/b/claude",
+            "/h/.local/bin/claude",
+            "/h/.claude/local/claude",
+            "/h/.npm-global/bin/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "/usr/bin/claude",
+        ];
         assert_eq!(tried.into_inner(), expected.map(PathBuf::from));
         // The first executable one wins.
         let only = |wanted: &'static [&'static str]| move |path: &Path| wanted.iter().any(|w| path == Path::new(w));
         assert_eq!(find_claude(Some("/a:/b"), home, only(&["/b/claude", "/opt/homebrew/bin/claude"])), Some("/b/claude".into()));
         assert_eq!(find_claude(Some("/a"), home, only(&["/h/.claude/local/claude"])), Some("/h/.claude/local/claude".into()));
         assert_eq!(find_claude(None, None, only(&["/usr/local/bin/claude"])), Some("/usr/local/bin/claude".into()));
+        // The Linux places: npm with a user prefix, and a system Node.
+        let npm = only(&["/h/.npm-global/bin/claude", "/usr/bin/claude"]);
+        assert_eq!(find_claude(None, home, npm), Some("/h/.npm-global/bin/claude".into()));
+        assert_eq!(find_claude(Some("/a"), None, only(&["/usr/bin/claude"])), Some("/usr/bin/claude".into()));
     }
 
     #[test]
