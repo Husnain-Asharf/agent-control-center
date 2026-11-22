@@ -56,7 +56,7 @@ xattr -dr com.apple.quarantine "/Applications/Agent Control Center.app"
 
 ### Linux
 
-The Linux builds are for x86_64.
+The Linux builds are for x86_64. Linux support is new, so please [open an issue](../../issues/new/choose) if something does not work.
 
 - AppImage, for any distribution: make it executable, then run it.
 

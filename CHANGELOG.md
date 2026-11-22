@@ -14,8 +14,7 @@ Linux support.
   next to the macOS `.dmg` files. They are built on Ubuntu 22.04 and need
   glibc 2.35 or later. The data directory on Linux is
   `~/.local/share/AgentControlCenter`.
-- CI runs the tests on Ubuntu 22.04 as well as macOS, on every branch. A failed
-  check shows the last lines of its output as an annotation.
+- CI runs the tests on Ubuntu 22.04 as well as macOS, on every branch.
 
 ### Changed
 
@@ -27,8 +26,14 @@ Linux support.
   its own window title bar.
 - The shortcut hints show `Ctrl+K` on Linux.
 
+### Fixed
+
+- The Overview says "Asked to edit" for a file edit, not "Asked to run".
+
 ### Known limitations
 
+- Linux builds are new and less tested than the macOS ones. Please report what
+  does not work.
 - Linux builds are x86_64 only, and unsigned like the macOS ones.
 - Linux has no key for "next that needs you" (`Cmd+J` on macOS), because
   `Ctrl+J` is a newline in the session terminal.
