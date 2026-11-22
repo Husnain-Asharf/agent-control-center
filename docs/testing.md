@@ -2,7 +2,7 @@
 
 On a fresh clone run `npm ci` and then `npm run sidecars` once. `tauri-build` needs the bundled binaries in `src-tauri/binaries/`, so `cargo build` and `cargo test` fail without it. CI does the same before the cargo tests.
 
-There are four layers. CI runs the first three on macOS and on Ubuntu 22.04, on every push and on pull requests to `main`. The smoke script is run by hand.
+There are four layers. CI runs the first three on macOS, Ubuntu 22.04 and Windows, on every push and on pull requests to `main`. The smoke script is run by hand.
 
 ## UI unit tests
 
@@ -26,11 +26,11 @@ Runs `tsc --noEmit` (TypeScript strict) and a production Vite build.
 cargo test --workspace
 ```
 
-Covers the daemon, the hook, the protocol and the bridge. This includes the rule matching for "Always allow", the protected path checks, session lifecycle, and a test that runs the bridge against the real `accd`.
+Covers the daemon, the hook, the protocol, the transport and the bridge. This includes the rule matching for "Always allow", the protected path checks, session lifecycle, and a test that runs the bridge against the real `accd`. A small stand-in program, `crates/accd/tests/fixtures/stand-in.rs`, plays Claude Code and `accd` in these tests, so they run the same on every platform. `cargo build -p accd` builds it next to `accd`.
 
 ## End-to-end smoke
 
-`scripts/smoke.mjs` drives `accd` over its Unix socket the way the app does. It uses a temporary data directory and a temporary git repo, never your real data or repos, and removes both at the end.
+`scripts/smoke.mjs` drives `accd` over its Unix socket the way the app does. It uses a temporary data directory and a temporary git repo, never your real data or repos, and removes both at the end. It runs on macOS and Linux.
 
 Build first, then run:
 
