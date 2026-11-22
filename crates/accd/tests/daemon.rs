@@ -1426,9 +1426,13 @@ async fn lagging_app_client_is_closed() {
     let s = start_session(&mut app, &h.repo, "Busy").await;
 
     // The app stops reading while more events than the fan-out holds are sent.
-    let used = json!({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "/a.rs"}});
-    for _ in 0..4200 {
-        let mut hk = hook(&h.socket(), &s.id, used.clone()).await;
+    // The first ones are large, so they fill the socket buffer whatever its
+    // size (8 KiB on macOS, about 200 KiB on Linux) and the rest wait in the
+    // fan-out.
+    let used = |file_path: String| json!({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": file_path}});
+    let large = std::iter::repeat_n(used(format!("/{}", "a".repeat(64 * 1024))), 32);
+    for payload in large.chain(std::iter::repeat_n(used("/a.rs".into()), 4200)) {
+        let mut hk = hook(&h.socket(), &s.id, payload).await;
         hook_reply(&mut hk).await;
     }
     // It gets what was already sent, then the daemon closes the connection.
