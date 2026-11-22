@@ -2,7 +2,7 @@
 
 On a fresh clone run `npm ci` and then `npm run sidecars` once. `tauri-build` needs the bundled binaries in `src-tauri/binaries/`, so `cargo build` and `cargo test` fail without it. CI does the same before the cargo tests.
 
-There are four layers. CI runs the first three on macOS and on Ubuntu 22.04, on every push and on pull requests to `main`. When one fails, the run's annotations show the last 120 lines of its output. The smoke script is run by hand.
+There are four layers. CI runs the first three on macOS and on Ubuntu 22.04, on every push and on pull requests to `main`. The smoke script is run by hand.
 
 ## UI unit tests
 
