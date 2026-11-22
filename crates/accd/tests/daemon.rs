@@ -522,6 +522,51 @@ async fn approval_round_trip() {
     stop(server).await;
 }
 
+/// Runs the real acc-hook as Claude Code does, with `payload` on stdin, and
+/// returns what it printed. `cargo build -p acc-hook` builds it next to the
+/// stand-in.
+async fn run_hook(socket: &Path, session_id: &str, payload: Value) -> String {
+    use std::io::Write;
+    let hook = fixture().with_file_name(format!("acc-hook{}", std::env::consts::EXE_SUFFIX));
+    assert!(hook.is_file(), "{} is missing. Run cargo build -p acc-hook.", hook.display());
+    let mut child = Command::new(hook)
+        .env("ACC_SESSION_ID", session_id)
+        .env("ACC_SOCKET", socket)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+    let out = timeout(WAIT, tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())).await.unwrap().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn the_hook_program_gets_the_decision_and_fails_closed() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Run the hook").await;
+
+    for (decision, reply) in [(Decision::AllowOnce, permission_reply(true, None)), (Decision::Deny, permission_reply(false, Some(DENIED)))] {
+        let hook = tokio::spawn({
+            let (socket, id) = (h.socket(), s.id.clone());
+            async move { run_hook(&socket, &id, bash("make test")).await }
+        });
+        let a = app.approval_created().await;
+        assert_eq!(a.summary, "make test");
+        app.call(Request::ApprovalDecide { approval_id: a.id, decision }).await;
+        assert_eq!(hook.await.unwrap(), reply);
+    }
+
+    // With the daemon gone, the request is denied.
+    stop(server).await;
+    drop(app);
+    let gone = "Agent Control Center is not running, so this was denied. Start the app and try again.";
+    assert_eq!(run_hook(&h.socket(), &s.id, bash("make test")).await, permission_reply(false, Some(gone)));
+}
+
 #[tokio::test]
 async fn allow_always_auto_allows_next_time() {
     let h = Harness::new();
