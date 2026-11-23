@@ -3,7 +3,7 @@ import { ApprovalDock } from '../components/ApprovalDock';
 import { Lamp, STATUS_LABEL } from '../components/Lamp';
 import { errorText } from '../lib/errorText';
 import { eventText } from '../lib/eventText';
-import { clock, fmtTimer, worktreeLabel } from '../lib/format';
+import { clock, fmtTimer, folderLabel } from '../lib/format';
 import { request } from '../lib/ipc';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
@@ -69,7 +69,7 @@ export function SessionView() {
     request(method, { session_id: session.id }).catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
 
   const elapsed = (running ? now : (session.ended_at ?? session.status_since)) - session.started_at;
-  const worktree = worktreeLabel(session.worktree);
+  const folder = folderLabel(session);
 
   return (
     <div className="screen--flush agent">
@@ -113,9 +113,9 @@ export function SessionView() {
             </dd>
           </div>
           <div>
-            <dt>Worktree</dt>
+            <dt>Folder</dt>
             <dd>
-              <code>{worktree}</code>
+              <code>{folder}</code>
             </dd>
           </div>
           <div>
@@ -124,7 +124,13 @@ export function SessionView() {
           </div>
         </dl>
       </header>
-      {pending && <ApprovalDock approval={pending} projectName={project?.name ?? 'this project'} />}
+      {pending && (
+        <ApprovalDock
+          approval={pending}
+          projectName={project?.name ?? 'this project'}
+          baseBranch={project?.base_branch ?? 'the base branch'}
+        />
+      )}
       <div className="agent-body">
         <div className="term-col">
           <TerminalView key={terminalKey(session, connEpoch)} sessionId={session.id} />

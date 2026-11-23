@@ -33,6 +33,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const preset = route.name === 'project' ? route.param : null;
   const [projectId, setProjectId] = useState(preset ?? '');
   const [task, setTask] = useState('');
+  const [separate, setSeparate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -42,6 +43,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   }, [projects, projectId]);
 
   const canStart = !busy && task.trim() !== '' && projectId !== '';
+  const base = projectsById[projectId]?.base_branch ?? 'the base branch';
 
   const submit = async () => {
     if (!canStart) return;
@@ -52,6 +54,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         project_id: projectId,
         agent: 'claude',
         task: task.trim(),
+        mode: separate ? 'worktree' : 'project',
       });
       onClose();
       go(`#session/${session.id}`);
@@ -63,7 +66,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog title="New session" onClose={onClose} onSubmit={submit}>
-      <p className="muted">The session starts in its own worktree, so it cannot touch other sessions' files.</p>
+      <p className="muted">
+        {separate
+          ? "The session starts in its own worktree, so it cannot touch other sessions' files."
+          : `The session works in the project folder, on its current branch. It asks before it changes files on ${base}.`}
+      </p>
       <div className="field">
         <span>Agent</span>
         <input className="field-input" value="Claude Code" readOnly aria-label="Agent" tabIndex={-1} />
@@ -91,7 +98,11 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           placeholder="For example: add pagination to the orders endpoint"
         />
       </label>
-      <p className="field-note">Starts on a new branch named after the task.</p>
+      <label className="check">
+        <input type="checkbox" name="separate" checked={separate} onChange={(e) => setSeparate(e.target.checked)} />
+        Separate folder and branch
+      </label>
+      {separate && <p className="field-note">Starts in its own worktree, on a new branch named after the task.</p>}
       {error && (
         <p className="msg-flag" role="alert">
           {error}

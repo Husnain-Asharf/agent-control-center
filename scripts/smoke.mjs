@@ -40,6 +40,7 @@ const SOCKET_WAIT = 15_000;
 const PROTOCOL_VERSION = 1;
 const DENIED_MESSAGE = 'Denied in Agent Control Center.';
 const ALLOW_REPLY = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}';
+const PRE_TOOL_ALLOW = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}';
 const DENY_REPLY = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"${DENIED_MESSAGE}"}}}`;
 // Claude Code's first-run folder trust prompt.
 // Matched with whitespace removed, because the TUI positions words with cursor moves.
@@ -319,7 +320,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 // ---------------------------------------------------------------- results
 
 const NAMES = {
-  1: 'New session starts in .worktrees/<slug> on agent/<slug>',
+  1: 'Worktree session starts in .worktrees/<slug> on agent/<slug>',
   2: 'Typed input reaches Claude',
   3: 'Permission request reaches Approvals, Allow once runs it',
   4: 'Always allow auto-allows the next identical request (actor policy)',
@@ -328,6 +329,8 @@ const NAMES = {
   7: 'Daemon restart: session Stopped, Restart resumes it',
   8: 'Pending approval survives the app; Esc in Claude cancels it',
   9: 'PermissionRequest fields: tool_name and tool_input',
+  10: 'Project folder session makes no worktree and no branch',
+  11: 'First edit on the base branch asks; Make branch keeps the changes',
 };
 
 function record(n, status, note) {
@@ -461,7 +464,7 @@ async function main_() {
 
   // 1. worktree and branch
   const ok1 = await item(1, async () => {
-    session = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK });
+    session = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK, mode: 'worktree' });
     new Tracker(main, session.id, onChunk);
     const slug = session.branch.replace(/^agent\//, '');
     if (!session.branch.startsWith('agent/') || !slug) throw new Error(`branch is ${session.branch}`);
@@ -475,8 +478,48 @@ async function main_() {
   });
   if (!ok1) {
     for (const n of [2, 3, 4, 5, 6, 7, 8, 9]) record(n, 'NOT RUN', 'item 1 failed');
-    return;
   }
+
+  // 10 and 11. A session in the project folder, and its branch question. The tool call is
+  // simulated over a hook connection in both modes: it checks the daemon and git, not Claude.
+  let folderSession = null;
+  const ok10 = await item(10, async () => {
+    const branchesBefore = git(repo, 'branch', '--list', 'agent/*');
+    folderSession = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK });
+    if (folderSession.mode !== 'project') throw new Error(`mode is ${folderSession.mode}`);
+    if (realpath(folderSession.worktree) !== realpath(repo)) throw new Error(`folder is ${folderSession.worktree}`);
+    const head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD');
+    if (folderSession.branch !== head) throw new Error(`branch is ${folderSession.branch}, the folder is on ${head}`);
+    const branchesAfter = git(repo, 'branch', '--list', 'agent/*');
+    if (branchesAfter !== branchesBefore) throw new Error(`branches changed: ${branchesAfter}`);
+    return `in ${path.basename(realpath(repo))} on ${folderSession.branch}`;
+  });
+  if (ok10) {
+    await item(11, async () => {
+      const file = path.join(realpath(repo), 'README.md');
+      fs.appendFileSync(file, 'changed by the smoke test\n');
+      const from = main.mark();
+      const hk = await hookConn();
+      const reply = hk.hookCall(folderSession.id, {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: file, old_string: 'a', new_string: 'b' },
+      });
+      const isBranch = (e) => e.kind === 'approval_created' && e.data.session_id === folderSession.id && e.data.kind === 'branch';
+      const ev = await main.waitEvent('the branch question', isBranch, STEP_WAIT, from);
+      await main.call('approval_decide', { approval_id: ev.data.id, decision: 'make_branch' });
+      const answer = await reply;
+      if (!answer || answer.stdout !== PRE_TOOL_ALLOW) throw new Error(`hook reply was ${JSON.stringify(answer)}`);
+      const head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD');
+      if (head !== ev.data.branch) throw new Error(`the folder is on ${head}, expected ${ev.data.branch}`);
+      if (!fs.readFileSync(file, 'utf8').includes('changed by the smoke test')) throw new Error('the uncommitted change is gone');
+      return `made ${head}, the change is kept`;
+    });
+    await main.call('session_stop', { session_id: folderSession.id }).catch(() => {});
+  } else {
+    record(11, 'NOT RUN', 'item 10 failed');
+  }
+  if (!ok1) return;
 
   // Claude reads the task, answers, and goes Idle. First run may show the trust prompt.
   let ready = true;

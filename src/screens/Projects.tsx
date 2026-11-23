@@ -136,7 +136,7 @@ export function ProjectPage() {
         </div>
         {list.length === 0 ? (
           <div className="list">
-            <p className="empty-line">No sessions yet. Start a session here and it gets its own worktree.</p>
+            <p className="empty-line">No sessions yet. Start one here and it works in the project folder.</p>
           </div>
         ) : (
           <FleetLanes sessions={list} projects={projects} range={range} now={now} />

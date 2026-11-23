@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Lamp } from '../components/Lamp';
-import { alwaysAllowState, approvalKey, decide, decisionKeyAllowed, decisionKeysReady, useNow, wantsText } from '../lib/approvals';
+import {
+  alwaysAllowState,
+  approvalKey,
+  decide,
+  decisionFor,
+  decisionKeyAllowed,
+  decisionKeysReady,
+  isBranchQuestion,
+  useNow,
+  wantsText,
+} from '../lib/approvals';
 import { fmtTimer } from '../lib/format';
 import { go, useRoute } from '../lib/route';
 import type { Approval, Decision } from '../lib/types';
@@ -21,7 +31,10 @@ function ListItem({ ap, selected, now }: { ap: Approval; selected: boolean; now:
       <span className="ap-main">
         <span className="ap-title">{ap.summary}</span>
         <span className="ap-sub">{session?.title ?? 'Unknown session'}</span>
-        <span className="ap-sub faint">Claude Code in {project?.name ?? 'unknown project'}</span>
+        <span className="ap-sub faint">
+          Claude Code in {project?.name ?? 'unknown project'}
+          {isBranchQuestion(ap) && <> · on {project?.base_branch ?? 'the base branch'}</>}
+        </span>
       </span>
       <span className="ap-wait">{fmtTimer(now - ap.created_at)}</span>
     </button>
@@ -33,6 +46,8 @@ function Detail({ ap, now }: { ap: Approval; now: number }) {
   const project = useStore((s) => (session ? s.projects[session.project_id] : undefined));
   const [busy, setBusy] = useState(false);
   const projectName = project?.name ?? 'this project';
+  const base = project?.base_branch ?? 'the base branch';
+  const branchQuestion = isBranchQuestion(ap);
   const always = alwaysAllowState(ap);
   const json = useMemo(() => JSON.stringify(ap.input, null, 2) ?? 'null', [ap.input]);
 
@@ -56,7 +71,16 @@ function Detail({ ap, now }: { ap: Approval; now: number }) {
             <strong>Unknown session</strong>
           </span>
         )}
-        <h2 className="detail-title">{wantsText(ap.tool)}</h2>
+        <h2 className="detail-title">
+          {wantsText(ap.tool)}
+          {branchQuestion && <> on {base}</>}
+        </h2>
+        {branchQuestion && (
+          <p className="muted">
+            The project folder is on {base}. Make a branch first to keep {base} as it is, or allow this change on{' '}
+            {base}.
+          </p>
+        )}
         <pre className="well request">
           <code>{ap.summary}</code>
         </pre>
@@ -73,26 +97,45 @@ function Detail({ ap, now }: { ap: Approval; now: number }) {
           <dd>{fmtTimer(now - ap.created_at)}</dd>
         </dl>
       </div>
-      <div className="decide-bar">
-        <button className="btn btn--primary btn--lg" type="button" disabled={busy} onClick={() => act('allow_once')}>
-          Allow once <kbd className="kbd">A</kbd>
-        </button>
-        <button
-          className="btn btn--lg"
-          type="button"
-          disabled={busy || !always.enabled}
-          title={always.note ?? undefined}
-          onClick={() => act('allow_always')}
-        >
-          Always allow in {projectName} <kbd className="kbd">⇧A</kbd>
-        </button>
-        <button className="btn btn--lg btn--danger" type="button" disabled={busy} onClick={() => act('deny')}>
-          Deny <kbd className="kbd">D</kbd>
-        </button>
-        <p className="decide-note">
-          {always.enabled ? `Always allow adds a rule for this project: ${always.preview}.` : `${always.note}.`}
-        </p>
-      </div>
+      {branchQuestion ? (
+        <div className="decide-bar">
+          <button className="btn btn--primary btn--lg" type="button" disabled={busy} onClick={() => act('make_branch')}>
+            Make branch {ap.branch ?? ''} <kbd className="kbd">A</kbd>
+          </button>
+          <button className="btn btn--lg" type="button" disabled={busy} onClick={() => act('stay_on_base')}>
+            Allow on {base} <kbd className="kbd">⇧A</kbd>
+          </button>
+          <button className="btn btn--lg btn--danger" type="button" disabled={busy} onClick={() => act('deny')}>
+            Deny <kbd className="kbd">D</kbd>
+          </button>
+          <p className="decide-note">
+            Make branch starts {ap.branch ?? 'a branch'} at the current commit and keeps uncommitted changes. Every
+            session in this folder goes on with it. Allow on {base} lets this session change {base}, and it is not
+            asked again.
+          </p>
+        </div>
+      ) : (
+        <div className="decide-bar">
+          <button className="btn btn--primary btn--lg" type="button" disabled={busy} onClick={() => act('allow_once')}>
+            Allow once <kbd className="kbd">A</kbd>
+          </button>
+          <button
+            className="btn btn--lg"
+            type="button"
+            disabled={busy || !always.enabled}
+            title={always.note ?? undefined}
+            onClick={() => act('allow_always')}
+          >
+            Always allow in {projectName} <kbd className="kbd">⇧A</kbd>
+          </button>
+          <button className="btn btn--lg btn--danger" type="button" disabled={busy} onClick={() => act('deny')}>
+            Deny <kbd className="kbd">D</kbd>
+          </button>
+          <p className="decide-note">
+            {always.enabled ? `Always allow adds a rule for this project: ${always.preview}.` : `${always.note}.`}
+          </p>
+        </div>
+      )}
     </>
   );
 }
@@ -142,7 +185,7 @@ export function Approvals() {
         e.preventDefault();
         if (keyBusy.current || !decisionKeysReady(Date.now(), selected.current.since)) return;
         keyBusy.current = true;
-        void decide(sel.id, k).finally(() => {
+        void decide(sel.id, decisionFor(sel, k)).finally(() => {
           keyBusy.current = false;
         });
       }

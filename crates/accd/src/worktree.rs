@@ -167,19 +167,25 @@ const NO_HOOKS: &str = "core.hooksPath=/dev/null";
 #[cfg(windows)]
 const NO_HOOKS: &str = "core.hooksPath=NUL";
 
-/// Makes the branch `agent/<slug>` (`-2`, `-3` when the name is taken) at
-/// the folder's current commit and points `HEAD` at it. Nothing is checked
-/// out, so the files and the index stay as they are, and with hooks turned
-/// off no repo hook runs. Returns the branch's name.
-pub fn make_branch_in_place(folder: &Path, slug: &str) -> Result<String, WorktreeError> {
+/// The first of `agent/<slug>`, `agent/<slug>-2`, `-3` that is not a branch
+/// of the folder's repo yet.
+pub fn free_branch(folder: &Path, slug: &str) -> String {
     let mut n = 1;
-    let branch = loop {
+    loop {
         let name = if n == 1 { format!("agent/{slug}") } else { format!("agent/{slug}-{n}") };
         if run_git(folder, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_err() {
-            break name;
+            return name;
         }
         n += 1;
-    };
+    }
+}
+
+/// Makes the branch [`free_branch`] names at the folder's current commit
+/// and points `HEAD` at it. Nothing is checked out, so the files and the
+/// index stay as they are, and with hooks turned off no repo hook runs.
+/// Returns the branch's name.
+pub fn make_branch_in_place(folder: &Path, slug: &str) -> Result<String, WorktreeError> {
+    let branch = free_branch(folder, slug);
     // A repo with no commit yet has nothing to branch from: pointing HEAD at
     // the new name is enough, and the first commit creates it.
     if run_git(folder, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {

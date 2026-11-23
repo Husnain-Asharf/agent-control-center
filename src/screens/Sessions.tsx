@@ -25,7 +25,7 @@ export function Sessions() {
       </div>
       <div className="list">
         {list.length === 0 ? (
-          <p className="empty-line">No sessions yet. Start one and it gets its own worktree.</p>
+          <p className="empty-line">No sessions yet. Start one and it works in its project folder.</p>
         ) : (
           list.map((s) => (
             <a className="proj-row" key={s.id} href={`#session/${s.id}`}>

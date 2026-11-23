@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clock, fmtDur, fmtTimer, monogram, worktreeLabel } from './format';
+import { clock, fmtDur, fmtTimer, folderLabel, monogram, worktreeLabel } from './format';
 
 describe('monogram', () => {
   it('uses the first letters of the first two words', () => {
@@ -45,6 +45,14 @@ describe('clock', () => {
   it('formats local time as HH:MM', () => {
     expect(clock(new Date(2026, 0, 1, 9, 5).getTime())).toBe('09:05');
     expect(clock(new Date(2026, 0, 1, 23, 40).getTime())).toBe('23:40');
+  });
+});
+
+describe('folderLabel', () => {
+  it('says project folder for a session there, and names its worktree otherwise', () => {
+    expect(folderLabel({ mode: 'project', worktree: '/Users/x/app' })).toBe('Project folder');
+    expect(folderLabel({ mode: 'worktree', worktree: '/Users/x/app/.worktrees/fix' })).toBe('.worktrees/fix');
+    expect(folderLabel({ worktree: '/Users/x/app/.worktrees/fix' })).toBe('.worktrees/fix');
   });
 });
 

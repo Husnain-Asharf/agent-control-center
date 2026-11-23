@@ -1035,6 +1035,8 @@ impl Daemon {
     fn ask_branch(&mut self, session_id: &str, tool: &str, summary: &str, input: &Value, protected: bool) -> PreToolOutcome {
         let Some(entry) = self.sessions.get(session_id) else { return PreToolOutcome::Proceed };
         let project_id = entry.session.project_id.clone();
+        // The name Make branch will use, so the card shows the real one.
+        let branch = worktree::free_branch(Path::new(&entry.session.worktree), &worktree::slugify(&entry.session.title));
         let approval = Approval {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
@@ -1047,7 +1049,7 @@ impl Daemon {
             protected,
             rule_preview: None,
             kind: ApprovalKind::Branch,
-            branch: Some(format!("agent/{}", worktree::slugify(&entry.session.title))),
+            branch: Some(branch),
         };
         self.save_approval(&approval);
         self.emit(DaemonEvent::ApprovalCreated(approval.clone()));

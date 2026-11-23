@@ -23,13 +23,22 @@ export interface Project {
   added_at: number;
 }
 
+/** `project`: in the project folder, on its current branch. `worktree`: in its own worktree and branch. */
+export type SessionMode = 'project' | 'worktree';
+
 export interface Session {
   id: string;
   project_id: string;
   agent: string;
   title: string;
+  /** The folder's current branch (project mode) or the session's own branch. */
   branch: string;
+  /** The folder the session works in: the project folder or its worktree. */
   worktree: string;
+  /** Missing from an older daemon: read as `worktree`. */
+  mode?: SessionMode;
+  /** The user let this session change files on the base branch, so it is not asked again. */
+  stay_on_base?: boolean;
   status: SessionStatus;
   status_since: number;
   started_at: number;
@@ -54,9 +63,13 @@ export interface Approval {
   protected?: boolean;
   /** What Always allow would cover. Null or missing means it can only be allowed once. */
   rule_preview?: string | null;
+  /** `branch`: a session in the project folder wants to change files on the base branch. Missing means `permission`. */
+  kind?: 'permission' | 'branch';
+  /** For a branch question: the branch Make branch would create. */
+  branch?: string | null;
 }
 
-export type Decision = 'allow_once' | 'allow_always' | 'deny';
+export type Decision = 'allow_once' | 'allow_always' | 'deny' | 'make_branch' | 'stay_on_base';
 
 export interface EventRecord {
   seq: number;

@@ -4,8 +4,10 @@ import {
   alwaysAllowState,
   approvalKey,
   decide,
+  decisionFor,
   decisionKeyAllowed,
   decisionKeysReady,
+  isBranchQuestion,
   isProtectedApproval,
   wantsText,
   wantsVerb,
@@ -48,6 +50,22 @@ describe('wantsVerb', () => {
     expect(wantsVerb('MultiEdit')).toBe('edit');
     expect(wantsVerb('Write')).toBe('edit');
     expect(wantsVerb('WebFetch')).toBe('use WebFetch');
+  });
+});
+
+describe('decisionFor', () => {
+  it('keeps the decision for a permission request', () => {
+    for (const d of ['allow_once', 'allow_always', 'deny'] as const) {
+      expect(decisionFor({}, d)).toBe(d);
+      expect(decisionFor({ kind: 'permission' }, d)).toBe(d);
+    }
+  });
+  it('maps the same keys to the branch answers on a branch question', () => {
+    const q = { kind: 'branch' as const };
+    expect(isBranchQuestion(q)).toBe(true);
+    expect(decisionFor(q, 'allow_once')).toBe('make_branch');
+    expect(decisionFor(q, 'allow_always')).toBe('stay_on_base');
+    expect(decisionFor(q, 'deny')).toBe('deny');
   });
 });
 

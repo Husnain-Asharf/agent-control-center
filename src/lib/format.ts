@@ -30,6 +30,11 @@ export function clock(ts: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Where a session works, for its header: `Project folder`, or `.worktrees/<slug>` for its own worktree. */
+export function folderLabel(session: { mode?: 'project' | 'worktree'; worktree: string }): string {
+  return session.mode === 'project' ? 'Project folder' : worktreeLabel(session.worktree);
+}
+
 /** `.worktrees/<slug>` for a session's worktree path, which has backslashes on Windows. */
 export function worktreeLabel(path: string): string {
   return `.worktrees/${path.split(/[\\/]/).filter(Boolean).pop() ?? ''}`;

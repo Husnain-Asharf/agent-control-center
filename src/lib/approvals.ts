@@ -25,7 +25,23 @@ export function wantsVerb(tool: string): string {
   return `use ${tool}`;
 }
 
-export type ApprovalKey = Decision | 'next' | 'prev';
+/** Whether the approval is a branch question rather than a tool permission. */
+export function isBranchQuestion(a: Pick<Approval, 'kind'>): boolean {
+  return a.kind === 'branch';
+}
+
+/**
+ * The decision a key or button means for this approval. On a branch question the same
+ * keys make the branch (A), stay on the base branch (shift+A) or deny (D).
+ */
+export function decisionFor(a: Pick<Approval, 'kind'>, d: Decision): Decision {
+  if (!isBranchQuestion(a)) return d;
+  if (d === 'allow_once') return 'make_branch';
+  if (d === 'allow_always') return 'stay_on_base';
+  return d;
+}
+
+export type ApprovalKey = 'allow_once' | 'allow_always' | 'deny' | 'next' | 'prev';
 
 /** Maps a key press on the Approvals screen: A, shift+A, D, J and K. Null for anything else. */
 export function approvalKey(e: KeyLike): ApprovalKey | null {
