@@ -14,7 +14,7 @@ use crate::store::{AllowRule, NewEvent, Store};
 use crate::worktree::{self, Head, RepoInfo, WorktreeError};
 use acc_protocol::{
     Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, PlanUsage, Project, Session, SessionMode,
-    SessionRemoved, SessionStats, SessionStatus, SessionUsage, Snapshot, Stats, StatusChange,
+    SessionRemoved, SessionSample, SessionStats, SessionStatus, SessionUsage, Snapshot, Stats, StatusChange, UsageSample,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -309,6 +309,9 @@ pub(crate) struct Shared {
     /// Worktree sizes with when they were measured, so the stats poll does
     /// not walk a big folder every few seconds.
     folder_sizes: std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, Option<u64>)>>,
+    /// Woken by a `daemon_restart` request: the daemon then shuts down, and
+    /// the app starts a new one.
+    pub(crate) restart: tokio::sync::Notify,
 }
 
 /// A freshly spawned agent whose output pump has not started yet.
@@ -328,7 +331,28 @@ impl Shared {
             login_path: OnceCell::new(),
             branching: Mutex::new(()),
             folder_sizes: std::sync::Mutex::new(HashMap::new()),
+            restart: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Takes one usage sample when a session runs. See [`UsageSample`].
+    pub(crate) async fn sample_usage(&self) {
+        let rows = {
+            let state = self.state.lock().await;
+            state.sample_rows()
+        };
+        let Some((mut sample, pids)) = rows else { return };
+        #[cfg(unix)]
+        {
+            let table = blocking(process_table).await.unwrap_or_default();
+            for (row, pid) in sample.sessions.iter_mut().zip(pids) {
+                row.memory_bytes = pid.map(|pid| tree_memory(&table, pid).0);
+            }
+        }
+        #[cfg(windows)]
+        let _ = pids;
+        sample.ts = now_ms();
+        self.state.lock().await.keep_sample(&sample);
     }
 
     /// Removes a session that is not running. See [`acc_protocol::Request::SessionRemove`].
@@ -440,7 +464,9 @@ impl Shared {
         agent: &str,
         task: &str,
         mode: SessionMode,
+        send_task: bool,
     ) -> Result<Session, ApiError> {
+        let prompt = send_task.then_some(task);
         if agent != "claude" {
             return Err(ApiError::bad_request(format!("Unknown agent {agent:?}.")));
         }
@@ -461,7 +487,7 @@ impl Shared {
         let slug = worktree::slugify(task);
         let session_dir = self.cfg.paths.session_dir(&id);
         // A run that cannot start leaves no worktree or settings behind.
-        let planned = claude::launch_args(&claude::settings_path(&session_dir), &id, task, mode);
+        let planned = claude::launch_args(&claude::settings_path(&session_dir), &id, prompt, mode);
         if let Some(why) = pty::launch_error(&program, &planned) {
             return Err(ApiError::bad_request(why));
         }
@@ -479,7 +505,7 @@ impl Shared {
         .await??;
 
         let mut state = self.state.lock().await;
-        let args = claude::launch_args(&settings, &id, task, mode);
+        let args = claude::launch_args(&settings, &id, prompt, mode);
         let spawned = self.spawn_claude(&id, program, args, worktree.clone(), session_path)?;
         let now = now_ms();
         let session = Session {
@@ -1032,6 +1058,7 @@ impl Daemon {
             rule_preview: rule.as_ref().ok().map(rule_preview),
             kind: ApprovalKind::Permission,
             branch: None,
+            on_branch: None,
         };
 
         // A request that could never get a rule (a protected path, inline
@@ -1115,6 +1142,69 @@ impl Daemon {
 
     pub(crate) fn session_folder(&self, session_id: &str) -> Option<PathBuf> {
         self.sessions.get(session_id).map(|e| PathBuf::from(&e.session.worktree))
+    }
+
+    /// What a usage sample holds now, with each session's agent pid, or
+    /// `None` when no session runs.
+    fn sample_rows(&self) -> Option<(UsageSample, Vec<Option<u32>>)> {
+        let mut live: Vec<&SessionEntry> = self.sessions.values().filter(|e| e.live.is_some()).collect();
+        if live.is_empty() {
+            return None;
+        }
+        live.sort_by(|a, b| a.session.id.cmp(&b.session.id));
+        let plan = self.plan_usage.as_ref();
+        let sample = UsageSample {
+            ts: 0,
+            five_hour: plan.and_then(|p| p.five_hour.as_ref()).map(|w| w.used_percentage),
+            seven_day: plan.and_then(|p| p.seven_day.as_ref()).map(|w| w.used_percentage),
+            sessions: live
+                .iter()
+                .map(|e| SessionSample {
+                    session_id: e.session.id.clone(),
+                    cost_usd: e.session.usage.as_ref().map(|u| u.cost_usd).unwrap_or(0.0),
+                    context_used_percentage: e.session.usage.as_ref().and_then(|u| u.context_used_percentage),
+                    memory_bytes: None,
+                })
+                .collect(),
+        };
+        #[cfg(unix)]
+        let pids = live.iter().map(|e| e.live.as_ref().and_then(|l| l.pty.pid())).collect();
+        #[cfg(windows)]
+        let pids = live.iter().map(|_| None).collect();
+        Some((sample, pids))
+    }
+
+    fn keep_sample(&self, sample: &UsageSample) {
+        if let Err(e) = self.store.add_sample(sample, sample.ts - SAMPLE_KEEP_MS) {
+            eprintln!("accd: could not keep a usage sample: {e:#}");
+        }
+    }
+
+    pub(crate) fn usage_history(&self, since: i64) -> Result<Vec<UsageSample>, ApiError> {
+        self.store.samples(since).map_err(ApiError::internal)
+    }
+
+    pub(crate) fn set_base(&mut self, project_id: &str, base_branch: &str) -> Result<Project, ApiError> {
+        let base = base_branch.trim();
+        if base.is_empty() || base.contains(char::is_whitespace) {
+            return Err(ApiError::bad_request("Give a branch name, such as main."));
+        }
+        let project = self.projects.iter_mut().find(|p| p.id == project_id).ok_or_else(|| ApiError::not_found("Project not found."))?;
+        project.base_branch = base.to_string();
+        let project = project.clone();
+        if let Err(e) = self.store.upsert_project(&project) {
+            eprintln!("accd: could not save project {}: {e:#}", project.id);
+        }
+        self.emit(DaemonEvent::ProjectAdded(project.clone()));
+        Ok(project)
+    }
+
+    pub(crate) fn reset_base(&mut self, session_id: &str) -> Result<Session, ApiError> {
+        let entry = self.sessions.get_mut(session_id).ok_or_else(session_not_found)?;
+        entry.session.stay_on_base = false;
+        let session = entry.session.clone();
+        self.publish(&session);
+        Ok(session)
     }
 
     /// Drops a session from the app and the store. It must not be running.
@@ -1228,6 +1318,10 @@ impl Daemon {
             rule_preview: None,
             kind: ApprovalKind::Branch,
             branch: Some(branch),
+            on_branch: match worktree::read_head(Path::new(&entry.session.worktree)) {
+                Some(Head::Branch(b)) => Some(b),
+                _ => None,
+            },
         };
         self.save_approval(&approval);
         self.emit(DaemonEvent::ApprovalCreated(approval.clone()));
@@ -1549,6 +1643,9 @@ struct StatsRow {
     folder: PathBuf,
     own_folder: bool,
 }
+
+/// How long usage samples are kept.
+const SAMPLE_KEEP_MS: i64 = 7 * 24 * 3_600_000;
 
 /// How long a measured worktree size is reused.
 const FOLDER_SIZE_TTL: Duration = Duration::from_secs(120);

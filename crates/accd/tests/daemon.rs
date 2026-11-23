@@ -377,7 +377,7 @@ async fn start_project_session(app: &mut Client, repo: &Path, task: &str) -> Ses
 
 async fn start_in(app: &mut Client, repo: &Path, task: &str, mode: Option<SessionMode>) -> Session {
     let project = add_project(app, repo).await;
-    from(app.call(Request::SessionStart { project_id: project.id, agent: "claude".into(), task: task.into(), mode }).await)
+    from(app.call(Request::SessionStart { project_id: project.id, agent: "claude".into(), task: task.into(), mode, send_task: true }).await)
 }
 
 fn pre_tool(tool: &str, input: Value) -> Value {
@@ -1210,6 +1210,7 @@ async fn start_session_without_claude_fails_cleanly() {
             agent: "claude".into(),
             task: "Fix the bug".into(),
             mode: Some(SessionMode::Worktree),
+            send_task: true,
         };
         assert_eq!(app.call_err(start).await, ("agent_not_found".to_string(), CLAUDE_NOT_FOUND.to_string()));
         assert!(!h.repo.join(".worktrees").exists(), "no worktree");
@@ -1247,6 +1248,7 @@ async fn start_session_without_hook_fails_cleanly() {
             agent: "claude".into(),
             task: "Fix the bug".into(),
             mode: Some(SessionMode::Worktree),
+            send_task: true,
         };
         assert_eq!(app.call_err(start).await, hook_not_found(&hook_bin));
         assert!(!h.repo.join(".worktrees").exists(), "no worktree");
@@ -1696,6 +1698,7 @@ async fn a_claude_cmd_gets_the_task_as_typed() {
         agent: "claude".into(),
         task: format!("Long {}", "x".repeat(9000)),
         mode: Some(SessionMode::Worktree),
+        send_task: true,
     };
     let too_long = "The task is too long to start Claude Code through claude.cmd. Shorten it or install Claude Code's native build.";
     assert_eq!(app.call_err(long).await, ("bad_request".to_string(), too_long.to_string()));
@@ -1732,11 +1735,11 @@ async fn bad_requests_get_error_codes() {
         Request::SessionStop { session_id: unknown() },
         Request::SessionRestart { session_id: unknown() },
         Request::ApprovalDecide { approval_id: unknown(), decision: Decision::Deny },
-        Request::SessionStart { project_id: unknown(), agent: "claude".into(), task: "x".into(), mode: None },
+        Request::SessionStart { project_id: unknown(), agent: "claude".into(), task: "x".into(), mode: None, send_task: true },
     ] {
         assert_eq!(app.call_err(request.clone()).await.0, "not_found", "{request:?}");
     }
-    let other_agent = Request::SessionStart { project_id: unknown(), agent: "codex".into(), task: "x".into(), mode: None };
+    let other_agent = Request::SessionStart { project_id: unknown(), agent: "codex".into(), task: "x".into(), mode: None, send_task: true };
     assert_eq!(app.call_err(other_agent).await.0, "bad_request");
 
     // A hook for an unknown session gets an empty reply and creates nothing.
@@ -2193,5 +2196,54 @@ async fn a_session_in_a_shared_folder_is_told_about_the_others() {
     let out: Value = serde_json::from_str(&hook_reply(&mut hk).await.stdout.unwrap()).unwrap();
     let note = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
     assert!(note.contains("Add the API") && note.contains("SendMessage"), "{note}");
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn the_task_is_not_sent_to_claude_unless_asked() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let project = add_project(&mut app, &h.repo).await;
+    let s: Session = from(
+        app.call(Request::SessionStart { project_id: project.id, agent: "claude".into(), task: "Fix the login bug".into(), mode: None, send_task: false })
+            .await,
+    );
+    assert_eq!(s.title, "Fix the login bug");
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    let run = run_record(&s.worktree);
+    assert!(!run["args"].as_array().unwrap().iter().any(|a| a == "Fix the login bug"), "{}", run["args"]);
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn base_branch_edit_ask_again_and_usage_history() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Tidy").await;
+    let project = add_project(&mut app, &h.repo).await;
+
+    let (code, _) = app.call_err(Request::ProjectSetBase { project_id: project.id.clone(), base_branch: " ".into() }).await;
+    assert_eq!(code, "bad_request");
+    let p: Project = from(app.call(Request::ProjectSetBase { project_id: project.id.clone(), base_branch: "develop".into() }).await);
+    assert_eq!(p.base_branch, "develop");
+    let file = repo_root(&h.repo).join("README.md").to_string_lossy().into_owned();
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT, "main is no longer the base branch");
+
+    app.call(Request::ProjectSetBase { project_id: project.id.clone(), base_branch: "main".into() }).await;
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    let q = app.approval_created().await;
+    app.call(Request::ApprovalDecide { approval_id: q.id, decision: Decision::StayOnBase }).await;
+    hook_reply(&mut hk).await;
+    let reset: Session = from(app.call(Request::SessionResetBase { session_id: s.id.clone() }).await);
+    assert!(!reset.stay_on_base);
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    assert_eq!(app.approval_created().await.kind, ApprovalKind::Branch, "asked again");
+    drop(hk.next());
+
+    let history: Vec<acc_protocol::UsageSample> = from(app.call(Request::UsageHistory { since: 0 }).await);
+    assert!(history.is_empty(), "nothing sampled in the first minute");
     stop(server).await;
 }

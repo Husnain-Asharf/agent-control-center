@@ -38,7 +38,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e),
     };
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal?,
+        _ = server.restart_requested() => eprintln!("accd: restarting, as the app asked"),
+    }
     server.shutdown().await;
     Ok(())
 }

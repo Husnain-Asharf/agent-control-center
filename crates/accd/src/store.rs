@@ -1,4 +1,4 @@
-use acc_protocol::{Approval, ApprovalState, EventRecord, Project, Session, SessionStatus, StatusChange};
+use acc_protocol::{Approval, ApprovalState, EventRecord, Project, Session, SessionStatus, StatusChange, UsageSample};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
@@ -35,6 +35,8 @@ CREATE INDEX IF NOT EXISTS events_session ON events(session_id, seq);
 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS samples (ts INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS samples_ts ON samples (ts);
 CREATE TABLE IF NOT EXISTS rules (
     project_id TEXT NOT NULL,
     tool TEXT NOT NULL,
@@ -130,6 +132,26 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         self.load_all("SELECT data FROM sessions ORDER BY rowid")
+    }
+
+    /// Keeps a usage sample and drops the ones older than `keep_since`.
+    pub fn add_sample(&self, s: &UsageSample, keep_since: i64) -> Result<()> {
+        self.conn.execute("INSERT INTO samples (ts, data) VALUES (?1, ?2)", params![s.ts, serde_json::to_string(s)?])?;
+        self.conn.execute("DELETE FROM samples WHERE ts < ?1", params![keep_since])?;
+        Ok(())
+    }
+
+    /// The samples since `since`, oldest first.
+    pub fn samples(&self, since: i64) -> Result<Vec<UsageSample>> {
+        let mut stmt = self.conn.prepare("SELECT data FROM samples WHERE ts >= ?1 ORDER BY ts LIMIT 20160")?;
+        let rows = stmt.query_map(params![since], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(s) = serde_json::from_str(&row?) {
+                out.push(s);
+            }
+        }
+        Ok(out)
     }
 
     /// Deletes a session with its approvals and its events.
@@ -239,7 +261,7 @@ mod tests {
         Approval {
             id: id.into(), session_id: "s1".into(), tool: "Bash".into(), summary: "ls".into(), input: json!({"command": "ls"}),
             created_at: 1, state, decided_by: None, protected: false, rule_preview: Some("`ls` commands".into()),
-            kind: ApprovalKind::Permission, branch: None,
+            kind: ApprovalKind::Permission, branch: None, on_branch: None,
         }
     }
 

@@ -73,6 +73,7 @@ pub async fn run_server(cfg: DaemonConfig) -> anyhow::Result<ServerHandle> {
     let (stop, stopped) = oneshot::channel();
     let accept = tokio::spawn(accept_loop(listener, shared.clone(), stopped));
     tokio::spawn(watch_branches(Arc::downgrade(&shared)));
+    tokio::spawn(sample_usage(Arc::downgrade(&shared)));
     Ok(ServerHandle { stop, accept, shared, _lock: lock })
 }
 
@@ -86,6 +87,17 @@ async fn watch_branches(shared: std::sync::Weak<Shared>) {
         tokio::time::sleep(BRANCH_POLL).await;
         let Some(shared) = shared.upgrade() else { return };
         shared.state.lock().await.refresh_branches();
+    }
+}
+
+/// How often usage is sampled while a session runs.
+const SAMPLE_EVERY: Duration = Duration::from_secs(60);
+
+async fn sample_usage(shared: std::sync::Weak<Shared>) {
+    loop {
+        tokio::time::sleep(SAMPLE_EVERY).await;
+        let Some(shared) = shared.upgrade() else { return };
+        shared.sample_usage().await;
     }
 }
 
@@ -115,6 +127,11 @@ async fn lock_data_dir(path: &Path) -> anyhow::Result<File> {
 }
 
 impl ServerHandle {
+    /// Resolves when the app asked the daemon to restart.
+    pub async fn restart_requested(&self) {
+        self.shared.restart.notified().await;
+    }
+
     /// Stops accepting, closes every connection and kills every running
     /// agent without recording the exits, as if the daemon went away. The
     /// next `run_server` on the same dir marks those sessions Stopped.
@@ -271,8 +288,8 @@ async fn dispatch(
         }
         Request::Snapshot => to_json(&shared.state.lock().await.snapshot()),
         Request::ProjectAdd { path } => to_json(&shared.project_add(&path).await?),
-        Request::SessionStart { project_id, agent, task, mode } => {
-            to_json(&shared.session_start(&project_id, &agent, &task, mode.unwrap_or(SessionMode::Project)).await?)
+        Request::SessionStart { project_id, agent, task, mode, send_task } => {
+            to_json(&shared.session_start(&project_id, &agent, &task, mode.unwrap_or(SessionMode::Project), send_task).await?)
         }
         Request::SessionInput { session_id, data_b64 } => {
             let data = B64.decode(data_b64).map_err(|e| ApiError::bad_request(format!("data_b64 is not base64: {e}")))?;
@@ -295,6 +312,13 @@ async fn dispatch(
             json!({})
         }
         Request::Stats => to_json(&shared.stats().await?),
+        Request::UsageHistory { since } => to_json(&shared.state.lock().await.usage_history(since)?),
+        Request::ProjectSetBase { project_id, base_branch } => to_json(&shared.state.lock().await.set_base(&project_id, &base_branch)?),
+        Request::SessionResetBase { session_id } => to_json(&shared.state.lock().await.reset_base(&session_id)?),
+        Request::DaemonRestart => {
+            shared.restart.notify_one();
+            json!({})
+        }
         Request::ApprovalDecide { approval_id, decision } => match shared.approval_decide(&approval_id, decision).await? {
             Decided::Resolved(approval) => to_json(&approval),
             Decided::AlreadyResolved => json!({ "already_resolved": true }),

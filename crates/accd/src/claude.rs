@@ -278,10 +278,12 @@ pub fn status_text(usage: &SessionUsage, plan: Option<&PlanUsage>) -> String {
     parts.join(" · ")
 }
 
-pub fn launch_args(settings: &Path, session_id: &str, task: &str, mode: SessionMode) -> Vec<String> {
+/// `prompt`, when given, is Claude's first message. Without it Claude starts
+/// and waits for the user to type.
+pub fn launch_args(settings: &Path, session_id: &str, prompt: Option<&str>, mode: SessionMode) -> Vec<String> {
     let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned(), "--session-id".into(), session_id.into()];
     args.extend(setting_sources(mode));
-    args.push(task.into());
+    args.extend(prompt.map(str::to_string));
     args
 }
 
@@ -413,12 +415,16 @@ mod tests {
     #[test]
     fn launch_args_order() {
         assert_eq!(
-            launch_args(Path::new("/d/s.json"), "abc", "Fix the bug", SessionMode::Worktree),
+            launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Worktree),
             vec!["--settings", "/d/s.json", "--session-id", "abc", "Fix the bug"]
         );
         assert_eq!(
-            launch_args(Path::new("/d/s.json"), "abc", "Fix the bug", SessionMode::Project),
+            launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Project),
             vec!["--settings", "/d/s.json", "--session-id", "abc", "--setting-sources", "user,project", "Fix the bug"]
+        );
+        assert_eq!(
+            launch_args(Path::new("/d/s.json"), "abc", None, SessionMode::Worktree),
+            vec!["--settings", "/d/s.json", "--session-id", "abc"]
         );
     }
 

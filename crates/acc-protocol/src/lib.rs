@@ -135,6 +135,9 @@ pub struct Approval {
     /// For a `Branch` approval: the branch that Make branch would create.
     #[serde(default)]
     pub branch: Option<String>,
+    /// For a `Branch` approval: the branch the folder is on, `None` when it is on no branch.
+    #[serde(default)]
+    pub on_branch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -179,6 +182,10 @@ pub enum Request {
         /// `Project` when left out.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<SessionMode>,
+        /// Send `task` to Claude as the first message. Without it the task
+        /// only names the session, and Claude waits for the user.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        send_task: bool,
     },
     SessionInput { session_id: String, data_b64: String },
     SessionResize { session_id: String, cols: u16, rows: u16 },
@@ -198,6 +205,14 @@ pub enum Request {
     ProjectRemove { project_id: String },
     /// Memory and disk use of the sessions, and of the app's data.
     Stats,
+    /// The samples taken once a minute since `since` (milliseconds since 1970).
+    UsageHistory { since: i64 },
+    /// Changes the branch that the branch question protects.
+    ProjectSetBase { project_id: String, base_branch: String },
+    /// Asks the branch question again for a session that chose to stay on the base branch.
+    SessionResetBase { session_id: String },
+    /// Ends the daemon and its sessions. The app starts a new one.
+    DaemonRestart,
     ApprovalDecide { approval_id: String, decision: Decision },
     EventsList { session_id: Option<String>, limit: u32 },
     Hook { session_id: String, payload: serde_json::Value },
@@ -249,6 +264,27 @@ pub struct SessionStats {
     pub transcript_bytes: Option<u64>,
     /// The session's own worktree. `None` for a session in the project folder.
     pub folder_bytes: Option<u64>,
+}
+
+/// One session in a [`UsageSample`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct SessionSample {
+    pub session_id: String,
+    pub cost_usd: f64,
+    pub context_used_percentage: Option<f64>,
+    pub memory_bytes: Option<u64>,
+}
+
+/// What the daemon samples once a minute while a session runs. Kept 7 days.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct UsageSample {
+    /// Milliseconds since 1970.
+    pub ts: i64,
+    /// The plan's 5-hour and weekly use, 0 to 100, when known.
+    pub five_hour: Option<f64>,
+    pub seven_day: Option<f64>,
+    /// The running sessions.
+    pub sessions: Vec<SessionSample>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -354,7 +390,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test] fn request_envelope_shape() {
-        let r = RequestEnvelope { id: 7, request: Request::SessionStart { project_id: "p1".into(), agent: "claude".into(), task: "Fix bug".into(), mode: None } };
+        let r = RequestEnvelope { id: 7, request: Request::SessionStart { project_id: "p1".into(), agent: "claude".into(), task: "Fix bug".into(), mode: None, send_task: false } };
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({"id":7,"method":"session_start","params":{"project_id":"p1","agent":"claude","task":"Fix bug"}}));
     }
     #[test] fn unit_request_has_no_params() {
@@ -396,7 +432,7 @@ mod tests {
             id: "a1".into(), session_id: "s1".into(), tool: "Bash".into(), summary: "npm install x".into(),
             input: serde_json::json!({"command": "npm install x"}), created_at: 5, state: ApprovalState::Pending,
             decided_by: None, protected: false, rule_preview: Some("`npm install` commands".into()),
-            kind: ApprovalKind::Permission, branch: None,
+            kind: ApprovalKind::Permission, branch: None, on_branch: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!((&v["protected"], &v["rule_preview"]), (&serde_json::json!(false), &serde_json::json!("`npm install` commands")));
@@ -416,7 +452,7 @@ mod tests {
     }
     #[test] fn session_start_mode_is_optional() {
         let r: RequestEnvelope = serde_json::from_str(r#"{"id":1,"method":"session_start","params":{"project_id":"p","agent":"claude","task":"t"}}"#).unwrap();
-        assert_eq!(r.request, Request::SessionStart { project_id: "p".into(), agent: "claude".into(), task: "t".into(), mode: None });
+        assert_eq!(r.request, Request::SessionStart { project_id: "p".into(), agent: "claude".into(), task: "t".into(), mode: None, send_task: false });
         let r: RequestEnvelope = serde_json::from_str(r#"{"id":1,"method":"session_start","params":{"project_id":"p","agent":"claude","task":"t","mode":"project"}}"#).unwrap();
         assert!(matches!(r.request, Request::SessionStart { mode: Some(SessionMode::Project), .. }));
     }
