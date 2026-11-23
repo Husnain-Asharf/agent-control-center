@@ -2041,3 +2041,19 @@ async fn a_branch_switched_outside_the_session_shows_without_a_hook() {
     assert!(matches!(shown.await, DaemonEvent::SessionUpdated(_)));
     stop(server).await;
 }
+
+#[tokio::test]
+async fn restart_in_a_folder_that_is_gone_says_so() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Fix the bug").await;
+    app.call(Request::SessionStop { session_id: s.id.clone() }).await;
+    app.status(&s.id, SessionStatus::Stopped).await;
+    git(&h.repo, &["worktree", "remove", "--force", &s.worktree]);
+
+    let (code, message) = app.call_err(Request::SessionRestart { session_id: s.id.clone() }).await;
+    assert_eq!(code, "bad_request");
+    assert!(message.contains("is gone"), "{message}");
+    stop(server).await;
+}

@@ -804,7 +804,16 @@ impl Daemon {
         match &entry.live {
             Some(live) if live.stopping => Err(ApiError::bad_request("The session is still stopping. Try again in a moment.")),
             Some(_) => Err(ApiError::bad_request("The session is still running.")),
-            None => Ok(PathBuf::from(&entry.session.worktree)),
+            None => {
+                let folder = PathBuf::from(&entry.session.worktree);
+                if !folder.is_dir() {
+                    return Err(ApiError::bad_request(format!(
+                        "The session's folder {} is gone, so it cannot restart there. Start a new session instead.",
+                        folder.display()
+                    )));
+                }
+                Ok(folder)
+            }
         }
     }
 
