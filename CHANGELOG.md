@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-11-24
+
+Helper sessions, and more control over the Glass style.
 
 ### Added
 
@@ -12,6 +14,7 @@ follows [Semantic Versioning](https://semver.org/).
   bigger task, list the sessions there, and send them messages. Starting a
   helper asks you in the inbox. A helper shows which session it helps, and a
   lead lists its helpers.
+- Glass settings: how much it blurs and how see-through it is.
 
 ## [0.5.0] - 2026-11-24
 
@@ -252,6 +255,7 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.6.0]: ../../releases/tag/v0.6.0
 [0.5.0]: ../../releases/tag/v0.5.0
 [0.4.0]: ../../releases/tag/v0.4.0
 [0.3.1]: ../../releases/tag/v0.3.1
