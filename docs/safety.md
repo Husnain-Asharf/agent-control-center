@@ -55,6 +55,8 @@ Rules for runners name what they run: `npx vitest`, `uv run pytest`, `python3 -m
 - anything in or through `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker` or `.claude`, and the files `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc` and `.mcp.json`;
 - anything in `.config/gh` or `.config/gcloud`.
 
+On Windows a name also matches without the dots and spaces at its end, which Windows drops (`.claude.` is `.claude`). A short (8.3) name, a `~` followed by a digit such as `CLAUDE~1`, counts as a protected path too, because it can stand for any of these names. Short names in the session's own worktree path do not count.
+
 **Editing rules by hand.** Rules cannot be edited in the app yet. They live in `acc.db` in the [data directory](#data-and-privacy), table `rules`, and `accd` reads them on every request, so a change applies at once. To list them with their project names (on Linux the file is `~/.local/share/AgentControlCenter/acc.db`, on Windows `%LOCALAPPDATA%\AgentControlCenter\acc.db`):
 
 ```
@@ -138,6 +140,7 @@ On Windows: `taskkill /IM accd.exe /F`.
   - code run from files in the worktree: git hooks through `core.hooksPath` or husky, `npm install` lifecycle scripts, `git clone --template`, and `npm run` or `make` targets.
 - On Windows, Always allow never covers a shell command with an absolute path or a `:` in a word, such as `C:\x`, `/c/x`, `D:notes` or `host:3000`. It asks each time.
 - On Windows, Always allow never covers a short (8.3) name such as `CLAUDE~1`, a name that ends in a dot or a space, a device name such as `NUL` or `COM1`, a data stream such as `file::$DATA`, or a `\\?\` or `\\.\` prefix. Windows can read these as another file, so they ask each time.
+- On Windows, a git revision such as `HEAD~1` looks like a short name, so a command with one shows as a protected path.
 - On Windows, credentials that tools keep under `AppData`, such as those of gh and gcloud, are not protected paths.
 - Before you upgrade or uninstall on Windows, end the daemon: `taskkill /IM accd.exe /F`. The installer cannot replace files the running daemon uses.
 - If you set `ACC_DATA_DIR` on Windows, point it at a folder only you can open. The default, under `%LOCALAPPDATA%`, is private.

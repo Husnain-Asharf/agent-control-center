@@ -23,7 +23,9 @@ Windows support.
   except that a line break becomes a space.
 - On Windows the Always allow checks also know `cmd`, `powershell`, `pwsh`,
   `wsl`, `start` and `runas` as wrappers, `py` as python and `git.exe` as git,
-  and protected paths match with backslashes.
+  and protected paths match with backslashes. A protected name also matches
+  with dots or spaces at its end (`.claude.`), and a short (8.3) name such as
+  `CLAUDE~1` counts as a protected path.
 - CI runs the tests on Windows as well as macOS and Ubuntu 22.04.
 
 ### Changed
