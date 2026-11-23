@@ -25,6 +25,7 @@ Agent Control Center runs several Claude Code sessions in one window. Each sessi
 - "Always allow" never covers secrets files or risky commands.
 - An overview and an Analytics screen with your plan's 5-hour and weekly use, each session's cost, context, memory and disk, and an activity log of every approval and event.
 - Settings for text size, colors and a glass style. Sessions and projects can be removed from the app.
+- A session can start helper sessions in the same project and message them, to split a big task. You approve each helper.
 - A command palette (Cmd+K, or Ctrl+K on Linux and Windows) and keyboard shortcuts.
 - A soft chime when a session needs you.
 

@@ -41,6 +41,8 @@ export interface Session {
   stay_on_base?: boolean;
   /** What Claude Code last reported to its status line. Missing until then. */
   usage?: SessionUsage | null;
+  /** The session that started this one as its helper. */
+  lead_id?: string | null;
   status: SessionStatus;
   status_since: number;
   started_at: number;

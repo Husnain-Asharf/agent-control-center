@@ -99,6 +99,8 @@ Memory is that of Claude Code and every process it started, read from `ps` (not 
 
 **Restart.** Restart the daemon stops every session, like `pkill accd`, and the app starts a new daemon. Restart the app only reopens the window; sessions keep running.
 
+**Helpers and messages.** Each session gets three tools of its own from a small tool server in `acc-hook` (`acc-hook mcp`, passed with `--mcp-config`): `start_helper` starts a helper session in the project folder with a task as its first message, `list_sessions` lists the running sessions in the folder, and `send_message` types a message into another of them, marked with who it is from (Claude Code queues it while that session is busy). Starting a helper asks you in the inbox each time; listing and messaging do not. A message is joined to one line and loses its control characters, so it cannot press keys of its own. Only sessions in the project folder can start helpers, and messages go only between sessions in the same folder. Any process of yours can reach the daemon's socket (see Known limitations), so this adds no new way in.
+
 ## Keyboard shortcuts
 
 | Key | Action |

@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A session can start helper sessions in its project folder for parts of a
+  bigger task, list the sessions there, and send them messages. Starting a
+  helper asks you in the inbox. A helper shows which session it helps, and a
+  lead lists its helpers.
+
 ## [0.5.0] - 2026-11-24
 
 Usage numbers, more Settings, and fixes from testing 0.4.0.

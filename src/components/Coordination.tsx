@@ -43,7 +43,13 @@ export function Coordination({ project, sessions, now }: { project: Project; ses
       {c.shared.length > 0 && (
         <div className="coord-row">
           {c.shared.map((w) => (
-            <Card key={w.sessionId} work={w} session={byId[w.sessionId]} overlapping={overlapping} />
+            <Card
+              key={w.sessionId}
+              work={w}
+              session={byId[w.sessionId]}
+              overlapping={overlapping}
+              leadTitle={byId[byId[w.sessionId]?.lead_id ?? '']?.title}
+            />
           ))}
         </div>
       )}
@@ -70,7 +76,17 @@ export function Coordination({ project, sessions, now }: { project: Project; ses
   );
 }
 
-function Card({ work, session, overlapping }: { work: SessionWork; session: Session | undefined; overlapping: Set<string> }) {
+function Card({
+  work,
+  session,
+  overlapping,
+  leadTitle,
+}: {
+  work: SessionWork;
+  session: Session | undefined;
+  overlapping: Set<string>;
+  leadTitle?: string;
+}) {
   if (!session) return null;
   const more = work.files.length - SHOWN_FILES;
   return (
@@ -79,6 +95,7 @@ function Card({ work, session, overlapping }: { work: SessionWork; session: Sess
         <Lamp status={session.status} />
         <strong>{session.title}</strong>
       </span>
+      {session.lead_id && <span className="muted">Helper of {leadTitle ?? 'its lead'}</span>}
       {session.mode !== 'project' && (
         <span className="muted">
           on <code>{session.branch}</code>

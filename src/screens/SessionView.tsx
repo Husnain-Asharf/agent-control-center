@@ -46,6 +46,7 @@ export function SessionView() {
   const project = useStore((s) => (session ? s.projects[session.project_id] : undefined));
   const pending = useStore((s) => (param ? pendingForSession(s, param) : undefined));
   const pushToast = useStore((s) => s.pushToast);
+  const sessions = useStore((s) => s.sessions);
   const [removing, setRemoving] = useState(false);
   const stats = useStats();
   const connEpoch = useStore((s) => s.connEpoch);
@@ -77,6 +78,8 @@ export function SessionView() {
     request(method, { session_id: session.id }).catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
 
   const mine = stats?.sessions.find((r) => r.session_id === session.id);
+  const lead = session.lead_id ? sessions[session.lead_id] : undefined;
+  const helpers = Object.values(sessions).filter((x) => x.lead_id === session.id);
   const elapsed = (running ? now : (session.ended_at ?? session.status_since)) - session.started_at;
   const folder = folderLabel(session);
 
@@ -139,6 +142,31 @@ export function SessionView() {
               )}
             </dd>
           </div>
+          {session.lead_id && (
+            <div>
+              <dt>Helper of</dt>
+              <dd>
+                <a className="link" href={`#session/${session.lead_id}`}>
+                  {lead?.title ?? 'its lead'}
+                </a>
+              </dd>
+            </div>
+          )}
+          {helpers.length > 0 && (
+            <div>
+              <dt>Helpers</dt>
+              <dd>
+                {helpers.map((h, i) => (
+                  <span key={h.id}>
+                    {i > 0 && ', '}
+                    <a className="link" href={`#session/${h.id}`}>
+                      {h.title}
+                    </a>
+                  </span>
+                ))}
+              </dd>
+            </div>
+          )}
           <div>
             <dt>Branch</dt>
             <dd>
