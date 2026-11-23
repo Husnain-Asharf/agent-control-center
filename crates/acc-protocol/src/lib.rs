@@ -8,6 +8,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus { Starting, Working, NeedsYou, Idle, Done, Failed, Stopped }
 
+/// Where a session works. `Project`: in the project's own folder, on its
+/// current branch. `Worktree`: in its own worktree on a new `agent/<slug>`
+/// branch. Sessions saved before modes existed are `Worktree`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Project,
+    #[default]
+    Worktree,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct StatusChange { pub status: SessionStatus, pub at: i64 }
@@ -30,8 +41,17 @@ pub struct Session {
     pub project_id: String,
     pub agent: String,
     pub title: String,
+    /// The folder's branch when the session reported last (`Project` mode),
+    /// or the session's own branch (`Worktree` mode).
     pub branch: String,
+    /// The folder the session works in: the project folder or its worktree.
     pub worktree: String,
+    #[serde(default)]
+    pub mode: SessionMode,
+    /// The user chose to let this session change files on the base branch,
+    /// so it is not asked to make a branch again.
+    #[serde(default)]
+    pub stay_on_base: bool,
     pub status: SessionStatus,
     pub status_since: i64,
     pub started_at: i64,
@@ -43,6 +63,17 @@ pub struct Session {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState { Pending, Allowed, Denied, Cancelled, Expired }
+
+/// `Permission`: Claude Code asks to use a tool. `Branch`: a session in the
+/// project folder wants to change something while the folder is on the base
+/// branch, and the user can make a branch first.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalKind {
+    #[default]
+    Permission,
+    Branch,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -63,11 +94,25 @@ pub struct Approval {
     /// `None` when Always allow would allow this request once and add no rule.
     #[serde(default)]
     pub rule_preview: Option<String>,
+    #[serde(default)]
+    pub kind: ApprovalKind,
+    /// For a `Branch` approval: the branch that Make branch would create.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum Decision { AllowOnce, AllowAlways, Deny }
+pub enum Decision {
+    AllowOnce,
+    AllowAlways,
+    Deny,
+    /// A `Branch` approval: make the branch, then allow the request.
+    MakeBranch,
+    /// A `Branch` approval: allow the request on the base branch, and do not
+    /// ask this session again.
+    StayOnBase,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +136,14 @@ pub enum Request {
     Hello { client: ClientKind, version: u32 },
     Snapshot,
     ProjectAdd { path: String },
-    SessionStart { project_id: String, agent: String, task: String },
+    SessionStart {
+        project_id: String,
+        agent: String,
+        task: String,
+        /// `Project` when left out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionMode>,
+    },
     SessionInput { session_id: String, data_b64: String },
     SessionResize { session_id: String, cols: u16, rows: u16 },
     SessionAttach { session_id: String },
@@ -164,6 +216,17 @@ pub fn permission_reply(allow: bool, message: Option<&str>) -> String {
     serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}).to_string()
 }
 
+/// Claude Code PreToolUse hook reply (stdout of acc-hook): `allow` skips the
+/// permission prompt for this call, `deny` blocks it with `reason`, and `ask`
+/// makes Claude Code ask, which reaches the inbox as a PermissionRequest.
+pub fn pre_tool_reply(decision: &str, reason: Option<&str>) -> String {
+    let mut output = serde_json::json!({"hookEventName": "PreToolUse", "permissionDecision": decision});
+    if let Some(reason) = reason {
+        output["permissionDecisionReason"] = serde_json::json!(reason);
+    }
+    serde_json::json!({"hookSpecificOutput": output}).to_string()
+}
+
 /// `env_value` (`$ACC_DATA_DIR`) if set, else `AgentControlCenter` in the
 /// platform's data folder: `~/Library/Application Support` on macOS,
 /// `~/.local/share` on Linux and `%LOCALAPPDATA%` on Windows, which stays on
@@ -202,7 +265,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test] fn request_envelope_shape() {
-        let r = RequestEnvelope { id: 7, request: Request::SessionStart { project_id: "p1".into(), agent: "claude".into(), task: "Fix bug".into() } };
+        let r = RequestEnvelope { id: 7, request: Request::SessionStart { project_id: "p1".into(), agent: "claude".into(), task: "Fix bug".into(), mode: None } };
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({"id":7,"method":"session_start","params":{"project_id":"p1","agent":"claude","task":"Fix bug"}}));
     }
     #[test] fn unit_request_has_no_params() {
@@ -244,6 +307,7 @@ mod tests {
             id: "a1".into(), session_id: "s1".into(), tool: "Bash".into(), summary: "npm install x".into(),
             input: serde_json::json!({"command": "npm install x"}), created_at: 5, state: ApprovalState::Pending,
             decided_by: None, protected: false, rule_preview: Some("`npm install` commands".into()),
+            kind: ApprovalKind::Permission, branch: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!((&v["protected"], &v["rule_preview"]), (&serde_json::json!(false), &serde_json::json!("`npm install` commands")));
@@ -254,6 +318,30 @@ mod tests {
         let old = r#"{"id":"a1","session_id":"s1","tool":"Bash","summary":"ls","input":{"command":"ls"},"created_at":5,"state":"pending","decided_by":null}"#;
         let a: Approval = serde_json::from_str(old).unwrap();
         assert_eq!((a.protected, a.rule_preview), (false, None));
+        assert_eq!((a.kind, a.branch), (ApprovalKind::Permission, None));
+    }
+    #[test] fn session_from_an_older_daemon_is_a_worktree_session() {
+        let old = r#"{"id":"s1","project_id":"p1","agent":"claude","title":"t","branch":"agent/t","worktree":"/r/.worktrees/t","status":"idle","status_since":1,"started_at":1,"ended_at":null,"exit_code":null,"history":[]}"#;
+        let s: Session = serde_json::from_str(old).unwrap();
+        assert_eq!((s.mode, s.stay_on_base), (SessionMode::Worktree, false));
+    }
+    #[test] fn session_start_mode_is_optional() {
+        let r: RequestEnvelope = serde_json::from_str(r#"{"id":1,"method":"session_start","params":{"project_id":"p","agent":"claude","task":"t"}}"#).unwrap();
+        assert_eq!(r.request, Request::SessionStart { project_id: "p".into(), agent: "claude".into(), task: "t".into(), mode: None });
+        let r: RequestEnvelope = serde_json::from_str(r#"{"id":1,"method":"session_start","params":{"project_id":"p","agent":"claude","task":"t","mode":"project"}}"#).unwrap();
+        assert!(matches!(r.request, Request::SessionStart { mode: Some(SessionMode::Project), .. }));
+    }
+    #[test] fn branch_decisions_are_snake_case() {
+        assert_eq!(serde_json::to_string(&Decision::MakeBranch).unwrap(), "\"make_branch\"");
+        assert_eq!(serde_json::to_string(&Decision::StayOnBase).unwrap(), "\"stay_on_base\"");
+        assert_eq!(serde_json::to_string(&ApprovalKind::Branch).unwrap(), "\"branch\"");
+    }
+    #[test] fn pre_tool_reply_shapes() {
+        assert_eq!(pre_tool_reply("allow", None), r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#);
+        assert_eq!(
+            pre_tool_reply("deny", Some("no")),
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"no"}}"#
+        );
     }
     #[test] fn permission_reply_allow_and_deny() {
         assert_eq!(permission_reply(true, None), r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#);

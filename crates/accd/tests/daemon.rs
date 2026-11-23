@@ -3,8 +3,9 @@
 //! binary (`fixtures/stand-in.rs`) stands in for Claude Code.
 
 use acc_protocol::{
-    encode_line, permission_reply, Approval, ApprovalState, ClientKind, DaemonEvent, Decision, EventRecord, HookReply,
-    Project, Request, RequestEnvelope, ServerMsg, Session, SessionStatus, Snapshot, PROTOCOL_VERSION,
+    encode_line, permission_reply, pre_tool_reply, Approval, ApprovalKind, ApprovalState, ClientKind, DaemonEvent, Decision,
+    EventRecord, HookReply, Project, Request, RequestEnvelope, ServerMsg, Session, SessionMode, SessionStatus, Snapshot,
+    PROTOCOL_VERSION,
 };
 use acc_transport::ClientStream;
 use accd::daemon::{DaemonConfig, STOP_ACCD};
@@ -25,6 +26,7 @@ const WAIT: Duration = Duration::from_secs(10);
 const CLAUDE_NOT_FOUND: &str = "Claude Code was not found. Install it or add it to your PATH.";
 const EXPIRED: &str = "No decision in Agent Control Center within 55 minutes.";
 const DENIED: &str = "Denied in Agent Control Center.";
+const PROTECTED_ASK: &str = "This touches a protected path, so Agent Control Center asks each time.";
 /// The once-only reason for a runner with a flag or nothing to run.
 const RUNNER: &str = "runner with a flag or nothing to run, so a rule would cover anything it runs";
 
@@ -364,10 +366,26 @@ async fn add_project(app: &mut Client, repo: &Path) -> Project {
     from(app.call(Request::ProjectAdd { path: repo.display().to_string() }).await)
 }
 
+/// Starts a session in its own worktree, the mode most tests check.
 async fn start_session(app: &mut Client, repo: &Path, task: &str) -> Session {
-    let project = add_project(app, repo).await;
-    from(app.call(Request::SessionStart { project_id: project.id, agent: "claude".into(), task: task.into() }).await)
+    start_in(app, repo, task, Some(SessionMode::Worktree)).await
 }
+
+/// Starts a session in the project folder, the default.
+async fn start_project_session(app: &mut Client, repo: &Path, task: &str) -> Session {
+    start_in(app, repo, task, None).await
+}
+
+async fn start_in(app: &mut Client, repo: &Path, task: &str, mode: Option<SessionMode>) -> Session {
+    let project = add_project(app, repo).await;
+    from(app.call(Request::SessionStart { project_id: project.id, agent: "claude".into(), task: task.into(), mode }).await)
+}
+
+fn pre_tool(tool: &str, input: Value) -> Value {
+    json!({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input})
+}
+
+const SILENT: HookReply = HookReply { stdout: None, exit_code: 0 };
 
 /// A connection that sends one hook request, as acc-hook does (no hello).
 async fn hook(socket: &Path, session_id: &str, payload: Value) -> Client {
@@ -1188,7 +1206,12 @@ async fn start_session_without_claude_fails_cleanly() {
         let mut app = Client::app(&h.socket()).await;
         let project = add_project(&mut app, &h.repo).await;
 
-        let start = Request::SessionStart { project_id: project.id, agent: "claude".into(), task: "Fix the bug".into() };
+        let start = Request::SessionStart {
+            project_id: project.id,
+            agent: "claude".into(),
+            task: "Fix the bug".into(),
+            mode: Some(SessionMode::Worktree),
+        };
         assert_eq!(app.call_err(start).await, ("agent_not_found".to_string(), CLAUDE_NOT_FOUND.to_string()));
         assert!(!h.repo.join(".worktrees").exists(), "no worktree");
         assert_eq!(git(&h.repo, &["branch", "--list", "agent/*"]), "", "no branch");
@@ -1220,7 +1243,12 @@ async fn start_session_without_hook_fails_cleanly() {
         let mut app = Client::app(&h.socket()).await;
         let project = add_project(&mut app, &h.repo).await;
 
-        let start = Request::SessionStart { project_id: project.id, agent: "claude".into(), task: "Fix the bug".into() };
+        let start = Request::SessionStart {
+            project_id: project.id,
+            agent: "claude".into(),
+            task: "Fix the bug".into(),
+            mode: Some(SessionMode::Worktree),
+        };
         assert_eq!(app.call_err(start).await, hook_not_found(&hook_bin));
         assert!(!h.repo.join(".worktrees").exists(), "no worktree");
         assert_eq!(git(&h.repo, &["branch", "--list", "agent/*"]), "", "no branch");
@@ -1663,7 +1691,12 @@ async fn a_claude_cmd_gets_the_task_as_typed() {
     let worktrees = || std::fs::read_dir(h.repo.join(".worktrees")).unwrap().count();
     let before = worktrees();
     let project = add_project(&mut app, &h.repo).await;
-    let long = Request::SessionStart { project_id: project.id, agent: "claude".into(), task: format!("Long {}", "x".repeat(9000)) };
+    let long = Request::SessionStart {
+        project_id: project.id,
+        agent: "claude".into(),
+        task: format!("Long {}", "x".repeat(9000)),
+        mode: Some(SessionMode::Worktree),
+    };
     let too_long = "The task is too long to start Claude Code through claude.cmd. Shorten it or install Claude Code's native build.";
     assert_eq!(app.call_err(long).await, ("bad_request".to_string(), too_long.to_string()));
     assert_eq!(worktrees(), before, "no worktree");
@@ -1699,11 +1732,11 @@ async fn bad_requests_get_error_codes() {
         Request::SessionStop { session_id: unknown() },
         Request::SessionRestart { session_id: unknown() },
         Request::ApprovalDecide { approval_id: unknown(), decision: Decision::Deny },
-        Request::SessionStart { project_id: unknown(), agent: "claude".into(), task: "x".into() },
+        Request::SessionStart { project_id: unknown(), agent: "claude".into(), task: "x".into(), mode: None },
     ] {
         assert_eq!(app.call_err(request.clone()).await.0, "not_found", "{request:?}");
     }
-    let other_agent = Request::SessionStart { project_id: unknown(), agent: "codex".into(), task: "x".into() };
+    let other_agent = Request::SessionStart { project_id: unknown(), agent: "codex".into(), task: "x".into(), mode: None };
     assert_eq!(app.call_err(other_agent).await.0, "bad_request");
 
     // A hook for an unknown session gets an empty reply and creates nothing.
@@ -1805,4 +1838,172 @@ fn second_accd_exits_when_one_is_running() {
     std::io::Read::read_to_string(&mut second.0.stdout.take().unwrap(), &mut stdout).unwrap();
     assert!(status.success());
     assert_eq!(stdout.trim(), "accd already running");
+}
+
+#[tokio::test]
+async fn project_session_works_in_the_project_folder() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+
+    let s = start_project_session(&mut app, &h.repo, "Fix the login bug").await;
+    assert_eq!((s.mode, s.stay_on_base), (SessionMode::Project, false));
+    assert_eq!(Path::new(&s.worktree), repo_root(&h.repo));
+    assert_eq!(s.branch, "main");
+    assert!(!repo_root(&h.repo).join(".worktrees").exists(), "no worktree is made");
+    assert_eq!(git(&h.repo, &["branch", "--list", "agent/*"]), "", "no branch is made");
+
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    let run = run_record(&s.worktree);
+    let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
+    let settings = settings.to_string_lossy();
+    assert_eq!(
+        run["args"],
+        json!(["--settings", settings, "--session-id", s.id, "--setting-sources", "user,project", "Fix the login bug"])
+    );
+    assert_eq!(Path::new(run["cwd"].as_str().unwrap()), repo_root(&h.repo));
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn first_edit_on_the_base_branch_asks_to_make_a_branch() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Fix the login bug").await;
+    std::fs::write(h.repo.join("README.md"), "changed\n").unwrap();
+
+    let file = repo_root(&h.repo).join("README.md").to_string_lossy().into_owned();
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    let a = app.approval_created().await;
+    assert_eq!((a.kind, a.branch.as_deref(), a.tool.as_str()), (ApprovalKind::Branch, Some("agent/fix-the-login-bug"), "Edit"));
+    assert_eq!(a.rule_preview, None);
+    app.status(&s.id, SessionStatus::NeedsYou).await;
+
+    let decided: Approval = from(app.call(Request::ApprovalDecide { approval_id: a.id.clone(), decision: Decision::MakeBranch }).await);
+    assert_eq!(decided.state, ApprovalState::Allowed);
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("allow", None)));
+    assert_eq!(git(&h.repo, &["symbolic-ref", "--short", "HEAD"]), "agent/fix-the-login-bug");
+    assert_eq!(std::fs::read_to_string(h.repo.join("README.md")).unwrap(), "changed\n", "changes are kept");
+    let updated = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == s.id && u.branch == "agent/fix-the-login-bug"));
+    assert!(matches!(updated.await, DaemonEvent::SessionUpdated(_)));
+
+    // On the new branch the next edit goes through the normal approvals.
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT);
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn stay_on_base_and_deny_answer_the_branch_question() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Tidy the docs").await;
+    let file = repo_root(&h.repo).join("README.md").to_string_lossy().into_owned();
+
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Write", json!({"file_path": file}))).await;
+    let a = app.approval_created().await;
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::Deny }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("deny", Some(DENIED))));
+
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Write", json!({"file_path": file}))).await;
+    let a = app.approval_created().await;
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::StayOnBase }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("allow", None)));
+    let updated = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == s.id && u.stay_on_base));
+    assert!(matches!(updated.await, DaemonEvent::SessionUpdated(_)));
+    assert_eq!(git(&h.repo, &["symbolic-ref", "--short", "HEAD"]), "main");
+
+    // Not asked again.
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Write", json!({"file_path": file}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT);
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn only_changes_ask_and_only_on_the_base_branch() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Look around").await;
+    let file = repo_root(&h.repo).join("README.md").to_string_lossy().into_owned();
+
+    for payload in [pre_tool("Read", json!({"file_path": file})), pre_tool("Bash", json!({"command": "git status"}))] {
+        let mut hk = hook(&h.socket(), &s.id, payload).await;
+        assert_eq!(hook_reply(&mut hk).await, SILENT);
+    }
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Bash", json!({"command": "git add -A && git commit -m x"}))).await;
+    let a = app.approval_created().await;
+    assert_eq!(a.kind, ApprovalKind::Branch);
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::Deny }).await;
+    hook_reply(&mut hk).await;
+
+    // A folder the user switched to another branch is not asked about.
+    git(&h.repo, &["switch", "-q", "-c", "mine"]);
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT);
+    let updated = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == s.id && u.branch == "mine"));
+    assert!(matches!(updated.await, DaemonEvent::SessionUpdated(_)));
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn protected_paths_ask_in_the_project_folder_only() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let project = start_project_session(&mut app, &h.repo, "Read the config").await;
+    let worktree = start_session(&mut app, &h.repo, "Read the config").await;
+    let env = repo_root(&h.repo).join(".env").to_string_lossy().into_owned();
+
+    let mut hk = hook(&h.socket(), &project.id, pre_tool("Read", json!({"file_path": env}))).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("ask", Some(PROTECTED_ASK))));
+    let mut hk = hook(&h.socket(), &project.id, pre_tool("Bash", json!({"command": "cat android/key.properties"}))).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("ask", Some(PROTECTED_ASK))));
+
+    let mut hk = hook(&h.socket(), &worktree.id, pre_tool("Read", json!({"file_path": env}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT);
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn a_made_branch_settles_the_other_questions_in_the_folder() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let one = start_project_session(&mut app, &h.repo, "Add the API").await;
+    let two = start_project_session(&mut app, &h.repo, "Add the screens").await;
+    let file = repo_root(&h.repo).join("README.md").to_string_lossy().into_owned();
+
+    let mut first = hook(&h.socket(), &one.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    let a = app.approval_created().await;
+    let mut second = hook(&h.socket(), &two.id, pre_tool("Edit", json!({"file_path": file}))).await;
+    let b = app.approval_created().await;
+    assert_eq!((a.kind, b.kind), (ApprovalKind::Branch, ApprovalKind::Branch));
+
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::MakeBranch }).await;
+    assert_eq!(hook_reply(&mut first).await.stdout, Some(pre_tool_reply("allow", None)));
+    assert_eq!(hook_reply(&mut second).await, SILENT, "the other session goes on through the normal approvals");
+    assert_eq!(app.approval_resolved(&b.id).await.state, ApprovalState::Cancelled);
+    assert_eq!(git(&h.repo, &["symbolic-ref", "--short", "HEAD"]), "agent/add-the-api");
+    assert_eq!(git(&h.repo, &["branch", "--list", "agent/*"]).lines().count(), 1, "one branch only");
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn branch_answers_fit_branch_questions_only() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Install the deps").await;
+
+    let mut hk = hook(&h.socket(), &s.id, bash("npm install x")).await;
+    let a = app.approval_created().await;
+    assert_eq!(a.kind, ApprovalKind::Permission);
+    let (code, _) = app.call_err(Request::ApprovalDecide { approval_id: a.id.clone(), decision: Decision::MakeBranch }).await;
+    assert_eq!(code, "bad_request");
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::AllowOnce }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
+    stop(server).await;
 }

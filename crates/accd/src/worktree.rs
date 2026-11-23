@@ -135,6 +135,81 @@ pub fn create_worktree(repo: &RepoInfo, slug: &str) -> Result<(PathBuf, String),
     Ok((path, branch))
 }
 
+/// What a folder's `HEAD` points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Head {
+    Branch(String),
+    Detached,
+}
+
+/// Reads a folder's `HEAD` from git's files, without running git: from the
+/// folder's `.git` folder, or from the one its `.git` file points to (a
+/// linked worktree). `None` when there is neither.
+pub fn read_head(folder: &Path) -> Option<Head> {
+    let dot_git = folder.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        if target.is_absolute() { target } else { folder.join(target) }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    Some(match head.trim().strip_prefix("ref: refs/heads/") {
+        Some(branch) if !branch.is_empty() => Head::Branch(branch.to_string()),
+        _ => Head::Detached,
+    })
+}
+
+/// A `core.hooksPath` with no hooks in it, so git runs none.
+#[cfg(unix)]
+const NO_HOOKS: &str = "core.hooksPath=/dev/null";
+#[cfg(windows)]
+const NO_HOOKS: &str = "core.hooksPath=NUL";
+
+/// Makes the branch `agent/<slug>` (`-2`, `-3` when the name is taken) at
+/// the folder's current commit and points `HEAD` at it. Nothing is checked
+/// out, so the files and the index stay as they are, and with hooks turned
+/// off no repo hook runs. Returns the branch's name.
+pub fn make_branch_in_place(folder: &Path, slug: &str) -> Result<String, WorktreeError> {
+    let mut n = 1;
+    let branch = loop {
+        let name = if n == 1 { format!("agent/{slug}") } else { format!("agent/{slug}-{n}") };
+        if run_git(folder, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_err() {
+            break name;
+        }
+        n += 1;
+    };
+    // A repo with no commit yet has nothing to branch from: pointing HEAD at
+    // the new name is enough, and the first commit creates it.
+    if run_git(folder, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+        run_git(folder, &["-c", NO_HOOKS, "branch", "--no-track", &branch]).map_err(WorktreeError::Git)?;
+    }
+    run_git(folder, &["-c", NO_HOOKS, "symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])
+        .map_err(WorktreeError::Git)?;
+    Ok(branch)
+}
+
+/// The folders whose files git runs as hooks when the repo sets
+/// `core.hooksPath`, such as husky's. Husky 9 sets it to `.husky/_`, whose
+/// scripts run the ones in `.husky/`, so a folder named `_` brings its
+/// parent along. A relative setting is taken from `folder`. Empty when the
+/// setting is not there (git's own `.git/hooks` is protected as part of
+/// `.git`).
+pub fn hook_dirs(folder: &Path) -> Vec<PathBuf> {
+    let value = match run_git(folder, &["config", "--path", "--get", "core.hooksPath"]) {
+        Ok(value) if !value.is_empty() => value,
+        _ => return Vec::new(),
+    };
+    let path = PathBuf::from(value);
+    let dir = if path.is_absolute() { path } else { folder.join(path) };
+    let mut dirs = vec![dir.clone()];
+    if dir.file_name().is_some_and(|name| name == "_") {
+        dirs.extend(dir.parent().map(Path::to_path_buf));
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +307,80 @@ mod tests {
         create_worktree(&info, "two").unwrap();
         let ex = std::fs::read_to_string(dir.join(".git/info/exclude")).unwrap();
         assert_eq!(ex.lines().filter(|l| *l == ".worktrees/").count(), 1);
+    }
+
+    #[test]
+    fn read_head_names_the_branch_or_says_detached() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("proj");
+        init_repo(&dir);
+        assert_eq!(read_head(&dir), Some(Head::Branch("main".into())));
+        git(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(read_head(&dir), Some(Head::Detached));
+        assert_eq!(read_head(t.path()), None);
+    }
+
+    #[test]
+    fn read_head_follows_a_linked_worktree() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("proj");
+        init_repo(&dir);
+        let (path, _) = create_worktree(&inspect_repo(&dir).unwrap(), "fix").unwrap();
+        assert_eq!(read_head(&path), Some(Head::Branch("agent/fix".into())));
+    }
+
+    #[test]
+    fn make_branch_in_place_keeps_changes_and_runs_no_hook() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("my proj");
+        init_repo(&dir);
+        std::fs::write(dir.join("a.txt"), "changed").unwrap();
+        std::fs::write(dir.join("new.txt"), "new").unwrap();
+        git(&dir, &["add", "new.txt"]);
+        let hooks = dir.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for hook in ["post-checkout", "reference-transaction"] {
+            let marker = dir.join(format!("{hook}-ran"));
+            std::fs::write(hooks.join(hook), format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(hooks.join(hook), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        assert_eq!(make_branch_in_place(&dir, "fix").unwrap(), "agent/fix");
+        assert_eq!(read_head(&dir), Some(Head::Branch("agent/fix".into())));
+        assert!(branch_exists(&dir, "agent/fix"));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
+        assert_eq!(run_git(&dir, &["diff", "--cached", "--name-only"]).unwrap(), "new.txt");
+        assert!(!dir.join("post-checkout-ran").exists());
+        assert!(!dir.join("reference-transaction-ran").exists());
+    }
+
+    #[test]
+    fn make_branch_in_place_dedupes_and_works_before_the_first_commit() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("proj");
+        init_repo(&dir);
+        git(&dir, &["branch", "agent/fix"]);
+        assert_eq!(make_branch_in_place(&dir, "fix").unwrap(), "agent/fix-2");
+        let empty = t.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "-q", "-b", "main"]);
+        assert_eq!(make_branch_in_place(&empty, "first").unwrap(), "agent/first");
+        assert_eq!(read_head(&empty), Some(Head::Branch("agent/first".into())));
+    }
+
+    #[test]
+    fn hook_dirs_reads_core_hooks_path() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("proj");
+        init_repo(&dir);
+        assert!(hook_dirs(&dir).is_empty());
+        git(&dir, &["config", "core.hooksPath", ".husky/_"]);
+        assert_eq!(hook_dirs(&dir), vec![dir.join(".husky/_"), dir.join(".husky")]);
+        git(&dir, &["config", "core.hooksPath", "tools/hooks"]);
+        assert_eq!(hook_dirs(&dir), vec![dir.join("tools/hooks")]);
     }
 
     #[test]

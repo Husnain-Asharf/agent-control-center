@@ -1,4 +1,4 @@
-use acc_protocol::SessionStatus;
+use acc_protocol::{SessionMode, SessionStatus};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -189,7 +189,9 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     let mut hooks = serde_json::Map::new();
     for ev in HOOK_EVENTS {
         let mut entry = hook_command(hook_bin);
-        if ev == "PermissionRequest" {
+        // These two can wait for the user: a PermissionRequest for its
+        // approval, a PreToolUse for the branch question.
+        if ev == "PermissionRequest" || ev == "PreToolUse" {
             entry["timeout"] = json!(3600);
         }
         hooks.insert(ev.to_string(), json!([{ "hooks": [entry] }]));
@@ -199,28 +201,39 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-pub fn launch_args(settings: &Path, session_id: &str, task: &str) -> Vec<String> {
-    vec![
-        "--settings".into(),
-        settings.to_string_lossy().into_owned(),
-        "--session-id".into(),
-        session_id.into(),
-        task.into(),
-    ]
+/// The setting sources of a session in the project folder: the user's and
+/// the project's settings, but not the checkout's untracked
+/// `.claude/settings.local.json`, whose saved rules would let commands run
+/// without a PermissionRequest, so the inbox would never see them. A new
+/// worktree has no such file, so worktree sessions keep Claude Code's default.
+const PROJECT_SETTING_SOURCES: &str = "user,project";
+
+fn setting_sources(mode: SessionMode) -> Vec<String> {
+    match mode {
+        SessionMode::Project => vec!["--setting-sources".into(), PROJECT_SETTING_SOURCES.into()],
+        SessionMode::Worktree => Vec::new(),
+    }
 }
 
-pub fn resume_args(settings: &Path, session_id: &str) -> Vec<String> {
-    vec![
-        "--settings".into(),
-        settings.to_string_lossy().into_owned(),
-        "--resume".into(),
-        session_id.into(),
-    ]
+pub fn launch_args(settings: &Path, session_id: &str, task: &str, mode: SessionMode) -> Vec<String> {
+    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned(), "--session-id".into(), session_id.into()];
+    args.extend(setting_sources(mode));
+    args.push(task.into());
+    args
+}
+
+pub fn resume_args(settings: &Path, session_id: &str, mode: SessionMode) -> Vec<String> {
+    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned(), "--resume".into(), session_id.into()];
+    args.extend(setting_sources(mode));
+    args
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookEffect {
     Status(SessionStatus),
+    /// A tool is about to run: the session is Working, and the daemon checks
+    /// the call (the branch question, secret reads in the project folder).
+    PreTool { tool: String, summary: String, input: Value },
     Approval { tool: String, summary: String, input: Value },
     Activity(String),
     Nothing,
@@ -233,7 +246,11 @@ pub fn interpret_hook(payload: &Value) -> HookEffect {
     let tool = payload.get("tool_name").and_then(Value::as_str);
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
     match event {
-        "UserPromptSubmit" | "PreToolUse" => HookEffect::Status(SessionStatus::Working),
+        "UserPromptSubmit" => HookEffect::Status(SessionStatus::Working),
+        "PreToolUse" => {
+            let tool = tool.unwrap_or("unknown");
+            HookEffect::PreTool { tool: tool.to_string(), summary: summarize_tool(tool, &input), input }
+        }
         "PermissionRequest" => {
             let tool = tool.unwrap_or("unknown");
             HookEffect::Approval {
@@ -276,16 +293,24 @@ mod tests {
     #[test]
     fn launch_args_order() {
         assert_eq!(
-            launch_args(Path::new("/d/s.json"), "abc", "Fix the bug"),
+            launch_args(Path::new("/d/s.json"), "abc", "Fix the bug", SessionMode::Worktree),
             vec!["--settings", "/d/s.json", "--session-id", "abc", "Fix the bug"]
+        );
+        assert_eq!(
+            launch_args(Path::new("/d/s.json"), "abc", "Fix the bug", SessionMode::Project),
+            vec!["--settings", "/d/s.json", "--session-id", "abc", "--setting-sources", "user,project", "Fix the bug"]
         );
     }
 
     #[test]
     fn resume_args_order() {
         assert_eq!(
-            resume_args(Path::new("/d/s.json"), "abc"),
+            resume_args(Path::new("/d/s.json"), "abc", SessionMode::Worktree),
             vec!["--settings", "/d/s.json", "--resume", "abc"]
+        );
+        assert_eq!(
+            resume_args(Path::new("/d/s.json"), "abc", SessionMode::Project),
+            vec!["--settings", "/d/s.json", "--resume", "abc", "--setting-sources", "user,project"]
         );
     }
 
@@ -301,6 +326,7 @@ mod tests {
             assert_eq!(v["hooks"][ev][0]["hooks"][0]["command"], "'/bin/acc-hook'", "{ev}");
         }
         assert_eq!(v["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"], 3600);
+        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 3600);
         assert!(v["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
     }
 
@@ -335,6 +361,7 @@ mod tests {
             assert_eq!(entry["args"], json!([]), "{ev}");
         }
         assert_eq!(v["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"], 3600);
+        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 3600);
         assert!(v["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
     }
 
@@ -363,7 +390,10 @@ mod tests {
             HookEffect::Nothing
         );
         assert_eq!(interpret_hook(&json!({"hook_event_name":"UserPromptSubmit"})), HookEffect::Status(SessionStatus::Working));
-        assert_eq!(interpret_hook(&json!({"hook_event_name":"PreToolUse"})), HookEffect::Status(SessionStatus::Working));
+        assert_eq!(
+            interpret_hook(&json!({"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/r/a.rs"}})),
+            HookEffect::PreTool { tool: "Edit".into(), summary: "/r/a.rs".into(), input: json!({"file_path":"/r/a.rs"}) }
+        );
     }
 
     #[test]

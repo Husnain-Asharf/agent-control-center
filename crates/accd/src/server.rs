@@ -4,11 +4,11 @@
 //! coalesced here.
 
 use crate::claude::{self, HookEffect};
-use crate::daemon::{ApiError, ApprovalOutcome, Daemon, DaemonConfig, Decided, Shared};
+use crate::daemon::{Answer, ApiError, ApprovalOutcome, Daemon, DaemonConfig, Decided, PreToolOutcome, Shared};
 use crate::pty;
 use acc_protocol::{
-    encode_line, permission_reply, ClientKind, DaemonEvent, Decision, HookReply, Request, RequestEnvelope, ServerMsg,
-    PROTOCOL_VERSION,
+    encode_line, permission_reply, pre_tool_reply, ClientKind, DaemonEvent, Decision, HookReply, Request, RequestEnvelope,
+    ServerMsg, SessionMode, SessionStatus, PROTOCOL_VERSION,
 };
 use anyhow::Context;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -26,6 +26,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub const APPROVAL_EXPIRED: &str = "No decision in Agent Control Center within 55 minutes.";
 pub const APPROVAL_DENIED: &str = "Denied in Agent Control Center.";
+pub const PROTECTED_ASK: &str = "This touches a protected path, so Agent Control Center asks each time.";
 
 /// Events an app client may fall behind by before it is closed.
 const EVENT_CAPACITY: usize = 4096;
@@ -257,7 +258,9 @@ async fn dispatch(
         }
         Request::Snapshot => to_json(&shared.state.lock().await.snapshot()),
         Request::ProjectAdd { path } => to_json(&shared.project_add(&path).await?),
-        Request::SessionStart { project_id, agent, task } => to_json(&shared.session_start(&project_id, &agent, &task).await?),
+        Request::SessionStart { project_id, agent, task, mode } => {
+            to_json(&shared.session_start(&project_id, &agent, &task, mode.unwrap_or(SessionMode::Project)).await?)
+        }
         Request::SessionInput { session_id, data_b64 } => {
             let data = B64.decode(data_b64).map_err(|e| ApiError::bad_request(format!("data_b64 is not base64: {e}")))?;
             shared.state.lock().await.queue_input(&session_id, data)?;
@@ -273,7 +276,7 @@ async fn dispatch(
         }
         Request::SessionStop { session_id } => to_json(&shared.state.lock().await.stop_session(&session_id)?),
         Request::SessionRestart { session_id } => to_json(&shared.session_restart(&session_id).await?),
-        Request::ApprovalDecide { approval_id, decision } => match shared.state.lock().await.decide(&approval_id, decision)? {
+        Request::ApprovalDecide { approval_id, decision } => match shared.approval_decide(&approval_id, decision).await? {
             Decided::Resolved(approval) => to_json(&approval),
             Decided::AlreadyResolved => json!({ "already_resolved": true }),
         },
@@ -283,9 +286,39 @@ async fn dispatch(
 }
 
 enum Waited {
-    Decided(Result<Decision, oneshot::error::RecvError>),
+    Answered(Answer),
     Expired,
-    HookClosed,
+}
+
+/// Waits for the answer to a pending approval without holding the state
+/// lock. `None` closes the connection without a reply: the hook went away
+/// (the approval is cancelled), or the daemon is going away.
+async fn wait_for_answer(shared: &Shared, approval_id: &str, mut answer: oneshot::Receiver<Answer>, conn: &mut Reader) -> Option<Waited> {
+    enum Woke {
+        Answered(Result<Answer, oneshot::error::RecvError>),
+        Expired,
+        HookClosed,
+    }
+    let woke = tokio::select! {
+        answered = &mut answer => Woke::Answered(answered),
+        _ = tokio::time::sleep(shared.cfg.approval_timeout) => Woke::Expired,
+        _ = wait_closed(conn) => Woke::HookClosed,
+    };
+    match woke {
+        Woke::Answered(answered) => answered.ok().map(Waited::Answered),
+        Woke::Expired => {
+            if shared.state.lock().await.expire(approval_id) {
+                Some(Waited::Expired)
+            } else {
+                // An answer landed just before the timer fired.
+                answer.try_recv().ok().map(Waited::Answered)
+            }
+        }
+        Woke::HookClosed => {
+            shared.state.lock().await.cancel(approval_id);
+            None
+        }
+    }
 }
 
 /// Serves one hook call. `None` closes the connection without a reply,
@@ -303,35 +336,43 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
             shared.state.lock().await.tool_used(session_id, tool, &summary);
             return Some(silent);
         }
+        HookEffect::PreTool { tool, summary, input } => {
+            let outcome = {
+                let mut state = shared.state.lock().await;
+                state.hook_status(session_id, SessionStatus::Working);
+                state.pre_tool_check(session_id, &tool, &summary, &input)
+            };
+            let (approval_id, answer, protected) = match outcome {
+                PreToolOutcome::Proceed => return Some(silent),
+                PreToolOutcome::Ask => return Some(pre_tool("ask", Some(PROTECTED_ASK))),
+                PreToolOutcome::Branch { id, answer, protected } => (id, answer, protected),
+            };
+            return match wait_for_answer(shared, &approval_id, answer, conn).await? {
+                Waited::Answered(Answer::Decided(Decision::Deny)) => Some(pre_tool("deny", Some(APPROVAL_DENIED))),
+                // A yes on a protected path still asks for the path itself.
+                Waited::Answered(Answer::Decided(_)) if protected => Some(pre_tool("ask", Some(PROTECTED_ASK))),
+                Waited::Answered(Answer::Decided(_)) => Some(pre_tool("allow", None)),
+                Waited::Answered(Answer::Proceed) => Some(silent),
+                Waited::Expired => Some(pre_tool("deny", Some(APPROVAL_EXPIRED))),
+            };
+        }
         HookEffect::Nothing => return Some(silent),
     };
     let outcome = shared.state.lock().await.request_approval(session_id, tool, summary, input);
-    let (approval_id, mut decision) = match outcome {
+    let (approval_id, decision) = match outcome {
         ApprovalOutcome::Ignored => return Some(silent),
         ApprovalOutcome::Allowed => return Some(permission(true, None)),
         ApprovalOutcome::Pending { id, decision } => (id, decision),
     };
-    // Wait without holding the state lock.
-    let waited = tokio::select! {
-        decided = &mut decision => Waited::Decided(decided),
-        _ = tokio::time::sleep(shared.cfg.approval_timeout) => Waited::Expired,
-        _ = wait_closed(conn) => Waited::HookClosed,
-    };
-    match waited {
-        Waited::Decided(decided) => decided.ok().map(decision_reply),
-        Waited::Expired => {
-            if shared.state.lock().await.expire(&approval_id) {
-                Some(permission(false, Some(APPROVAL_EXPIRED)))
-            } else {
-                // A decision landed just before the timer fired.
-                decision.try_recv().ok().map(decision_reply)
-            }
-        }
-        Waited::HookClosed => {
-            shared.state.lock().await.cancel(&approval_id);
-            None
-        }
+    match wait_for_answer(shared, &approval_id, decision, conn).await? {
+        Waited::Answered(Answer::Decided(decision)) => Some(decision_reply(decision)),
+        Waited::Answered(Answer::Proceed) => Some(silent),
+        Waited::Expired => Some(permission(false, Some(APPROVAL_EXPIRED))),
     }
+}
+
+fn pre_tool(decision: &str, reason: Option<&str>) -> HookReply {
+    HookReply { stdout: Some(pre_tool_reply(decision, reason)), exit_code: 0 }
 }
 
 /// Resolves once the peer closed its end. A hook sends nothing after its request.
@@ -346,7 +387,7 @@ fn permission(allow: bool, message: Option<&str>) -> HookReply {
 
 fn decision_reply(decision: Decision) -> HookReply {
     match decision {
-        Decision::AllowOnce | Decision::AllowAlways => permission(true, None),
+        Decision::AllowOnce | Decision::AllowAlways | Decision::MakeBranch | Decision::StayOnBase => permission(true, None),
         Decision::Deny => permission(false, Some(APPROVAL_DENIED)),
     }
 }

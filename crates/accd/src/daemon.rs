@@ -11,9 +11,10 @@ use crate::pty::{self, PtySession, SpawnSpec};
 use crate::server::{self, OutputBuffer};
 use crate::session_path;
 use crate::store::{AllowRule, NewEvent, Store};
-use crate::worktree::{self, RepoInfo, WorktreeError};
+use crate::worktree::{self, Head, RepoInfo, WorktreeError};
 use acc_protocol::{
-    Approval, ApprovalState, DaemonEvent, Decision, EventRecord, Project, Session, SessionStatus, Snapshot, StatusChange,
+    Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, Project, Session, SessionMode, SessionStatus,
+    Snapshot, StatusChange,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -71,16 +72,31 @@ fn path_separators(platform: Platform) -> &'static [char] {
 /// Input fields that hold a path. Each is checked for protected paths, and a
 /// rule without a prefix needs every one that is present inside the worktree.
 const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
-/// Credential folders and files, and Claude Code's own settings, hooks and
-/// MCP servers (an agent that edits them can grant itself permissions). A
-/// path to or through one of them is protected.
-const PROTECTED_NAMES: [&str; 11] = [
+/// Credential folders and files, Claude Code's own settings, hooks and MCP
+/// servers (an agent that edits them can grant itself permissions), and
+/// git's own folder, whose hooks and config run code later. A path to or
+/// through one of them is protected.
+const PROTECTED_NAMES: [&str; 13] = [
     ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".claude", ".mcp.json",
+    ".git", "key.properties",
 ];
 /// A file whose name starts with this is protected: `.env`, `.env.local`, `.envrc`.
 const PROTECTED_PREFIX: &str = ".env";
-/// A file whose name ends with one of these is protected: `server.pem`, `id.key`.
-const PROTECTED_EXTENSIONS: [&str; 2] = [".pem", ".key"];
+/// A file whose name ends with one of these is protected: `server.pem`,
+/// `id.key`, and keystores such as `release.jks` and `cert.p12`.
+const PROTECTED_EXTENSIONS: [&str; 7] = [".pem", ".key", ".jks", ".p12", ".pfx", ".keystore", ".p8"];
+/// A JSON file whose name starts with one of these is protected:
+/// `credentials.json`, `service-account-prod.json`.
+const PROTECTED_JSON_PREFIXES: [&str; 2] = ["credentials", "service-account"];
+/// The folder in a project that holds the worktrees of sessions in their own
+/// folder. A rule of a session in the project folder never reaches into it.
+const WORKTREES_DIR: &str = ".worktrees";
+/// Tools that change files.
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+/// git subcommands that make a commit on the current branch.
+const COMMIT_SUBCOMMANDS: [&str; 7] = ["commit", "merge", "cherry-pick", "revert", "pull", "am", "rebase"];
+/// git options before the subcommand that take the next word as their value.
+const GIT_OPTIONS_WITH_VALUE: [&str; 6] = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"];
 /// The folder that holds the [`CREDENTIAL_CONFIG_DIRS`].
 const CONFIG_DIR: &str = ".config";
 /// Credential folders under `.config`. A path through `.config/<name>` is protected.
@@ -365,7 +381,13 @@ impl Shared {
         Ok(self.state.lock().await.add_project(info))
     }
 
-    pub(crate) async fn session_start(self: &Arc<Self>, project_id: &str, agent: &str, task: &str) -> Result<Session, ApiError> {
+    pub(crate) async fn session_start(
+        self: &Arc<Self>,
+        project_id: &str,
+        agent: &str,
+        task: &str,
+        mode: SessionMode,
+    ) -> Result<Session, ApiError> {
         if agent != "claude" {
             return Err(ApiError::bad_request(format!("Unknown agent {agent:?}.")));
         }
@@ -386,20 +408,25 @@ impl Shared {
         let slug = worktree::slugify(task);
         let session_dir = self.cfg.paths.session_dir(&id);
         // A run that cannot start leaves no worktree or settings behind.
-        let planned = claude::launch_args(&claude::settings_path(&session_dir), &id, task);
+        let planned = claude::launch_args(&claude::settings_path(&session_dir), &id, task, mode);
         if let Some(why) = pty::launch_error(&program, &planned) {
             return Err(ApiError::bad_request(why));
         }
         let hook_bin = self.cfg.hook_bin.clone();
-        let (worktree, branch, settings) = blocking(move || -> Result<_, ApiError> {
-            let (worktree, branch) = worktree::create_worktree(&repo, &slug)?;
+        let (worktree, branch, settings, hook_dirs) = blocking(move || -> Result<_, ApiError> {
+            let (worktree, branch) = match mode {
+                SessionMode::Worktree => worktree::create_worktree(&repo, &slug)?,
+                // The project folder as it is: no worktree and no branch.
+                SessionMode::Project => (repo.root.clone(), head_name(worktree::read_head(&repo.root))),
+            };
+            let hook_dirs = worktree::hook_dirs(&worktree);
             let settings = claude::write_settings(&session_dir, &hook_bin).map_err(ApiError::internal)?;
-            Ok((worktree, branch, settings))
+            Ok((worktree, branch, settings, hook_dirs))
         })
         .await??;
 
         let mut state = self.state.lock().await;
-        let args = claude::launch_args(&settings, &id, task);
+        let args = claude::launch_args(&settings, &id, task, mode);
         let spawned = self.spawn_claude(&id, program, args, worktree.clone(), session_path)?;
         let now = now_ms();
         let session = Session {
@@ -409,6 +436,8 @@ impl Shared {
             title: session_title(task),
             branch,
             worktree: worktree.to_string_lossy().into_owned(),
+            mode,
+            stay_on_base: false,
             status: SessionStatus::Starting,
             status_since: now,
             started_at: now,
@@ -417,6 +446,7 @@ impl Shared {
             history: vec![StatusChange { status: SessionStatus::Starting, at: now }],
         };
         state.add_session(session.clone(), spawned.live);
+        state.set_hook_dirs(&id, hook_dirs);
         let pump = server::spawn_output_pump(self.clone(), id.clone(), spawned.output, spawned.exited);
         state.set_pump(&id, pump);
         Ok(session)
@@ -430,7 +460,8 @@ impl Shared {
         if let Some(mut ended) = stopping {
             let _ = tokio::time::timeout(STOP_WAIT, ended.changed()).await;
         }
-        self.state.lock().await.restart_dir(session_id)?;
+        let dir = self.state.lock().await.restart_dir(session_id)?;
+        let hook_dirs = blocking(move || worktree::hook_dirs(&dir)).await?;
         let search_path = self.session_path(None).await;
         let program = self.claude_program(search_path.as_deref()).ok_or_else(ApiError::agent_not_found)?;
         self.check_hook()?;
@@ -441,11 +472,37 @@ impl Shared {
         let mut state = self.state.lock().await;
         // Checked again: another request may have restarted it in between.
         let worktree = state.restart_dir(session_id)?;
-        let spawned = self.spawn_claude(session_id, program, claude::resume_args(&settings, session_id), worktree, session_path)?;
+        let mode = state.entry(session_id)?.session.mode;
+        let spawned = self.spawn_claude(session_id, program, claude::resume_args(&settings, session_id, mode), worktree, session_path)?;
         let session = state.mark_restarted(session_id, spawned.live)?;
+        state.set_hook_dirs(session_id, hook_dirs);
         let pump = server::spawn_output_pump(self.clone(), session_id.to_string(), spawned.output, spawned.exited);
         state.set_pump(session_id, pump);
         Ok(session)
+    }
+
+    /// Decides an approval. Make branch first makes the branch, outside the
+    /// lock: if git fails, the question stays pending and the error says why.
+    /// When the folder is no longer on the base branch (another answer made a
+    /// branch, or the user switched), no second branch is made.
+    pub(crate) async fn approval_decide(self: &Arc<Self>, approval_id: &str, decision: Decision) -> Result<Decided, ApiError> {
+        if decision == Decision::MakeBranch {
+            let target = self.state.lock().await.branch_target(approval_id);
+            if let Some((folder, slug, base)) = target {
+                let made = blocking(move || -> Result<Option<(PathBuf, String)>, ApiError> {
+                    if matches!(worktree::read_head(&folder), Some(Head::Branch(branch)) if branch != base) {
+                        return Ok(None);
+                    }
+                    let branch = worktree::make_branch_in_place(&folder, &slug)?;
+                    Ok(Some((folder, branch)))
+                })
+                .await??;
+                if let Some((folder, branch)) = made {
+                    self.state.lock().await.branch_made(&folder, &branch, approval_id);
+                }
+            }
+        }
+        self.state.lock().await.decide(approval_id, decision)
     }
 
     pub(crate) async fn session_resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), ApiError> {
@@ -536,6 +593,9 @@ struct Live {
 struct SessionEntry {
     session: Session,
     live: Option<Live>,
+    /// The folders the repo's `core.hooksPath` names, read when the run
+    /// started. Requests on them are protected, like `.git`.
+    hook_dirs: Vec<PathBuf>,
     /// The last run's output and the stream position after it, kept after it exits.
     scrollback: Vec<u8>,
     scrollback_end: u64,
@@ -543,7 +603,7 @@ struct SessionEntry {
 
 impl SessionEntry {
     fn new(session: Session, live: Option<Live>) -> SessionEntry {
-        SessionEntry { session, live, scrollback: Vec::new(), scrollback_end: 0 }
+        SessionEntry { session, live, hook_dirs: Vec::new(), scrollback: Vec::new(), scrollback_end: 0 }
     }
 }
 
@@ -552,7 +612,28 @@ struct PendingApproval {
     project_id: String,
     /// What Always allow adds (shown as `rule_preview`), or why it allows once.
     rule: Result<AllowRule, OnceOnly>,
-    reply: oneshot::Sender<Decision>,
+    reply: oneshot::Sender<Answer>,
+}
+
+/// What a waiting hook gets back: the user's decision, or `Proceed` when its
+/// branch question was settled by another one (the folder got a branch), so
+/// the call goes on through the normal approvals.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Answer {
+    Decided(Decision),
+    Proceed,
+}
+
+/// The daemon's answer to a tool call that is about to run.
+pub(crate) enum PreToolOutcome {
+    /// Nothing to add: Claude Code goes on as it would.
+    Proceed,
+    /// Claude Code must ask, so the request reaches the inbox: a request on
+    /// a protected path from a session in the project folder.
+    Ask,
+    /// The branch question is pending. `protected` makes a yes an ask rather
+    /// than an allow, so the protected path still asks on its own.
+    Branch { id: String, answer: oneshot::Receiver<Answer>, protected: bool },
 }
 
 pub(crate) enum ApprovalOutcome {
@@ -561,7 +642,7 @@ pub(crate) enum ApprovalOutcome {
     /// A project rule allowed it.
     Allowed,
     /// Waits for a decision, which arrives on `decision`.
-    Pending { id: String, decision: oneshot::Receiver<Decision> },
+    Pending { id: String, decision: oneshot::Receiver<Answer> },
 }
 
 pub(crate) enum Decided {
@@ -844,6 +925,7 @@ impl Daemon {
     /// A status reported by the agent's hooks. A finished session stays
     /// finished, and Needs you holds while an approval waits.
     pub(crate) fn hook_status(&mut self, session_id: &str, status: SessionStatus) {
+        self.refresh_branch(session_id);
         let Some(entry) = self.sessions.get(session_id) else { return };
         if is_finished(&entry.session.status) || self.has_pending(session_id) {
             return;
@@ -866,7 +948,10 @@ impl Daemon {
         }
         let project_id = entry.session.project_id.clone();
         let worktree = PathBuf::from(&entry.session.worktree);
-        let rule = rule_for(&tool, &summary, &input, &worktree);
+        let rule = match touches_dirs(&summary, &input, &entry.hook_dirs, &worktree) {
+            true => Err(OnceOnly::Protected),
+            false => rule_for(&tool, &summary, &input, &worktree),
+        };
         let mut approval = Approval {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
@@ -878,6 +963,8 @@ impl Daemon {
             decided_by: None,
             protected: matches!(rule, Err(OnceOnly::Protected)),
             rule_preview: rule.as_ref().ok().map(rule_preview),
+            kind: ApprovalKind::Permission,
+            branch: None,
         };
 
         // A request that could never get a rule (a protected path, inline
@@ -908,6 +995,139 @@ impl Daemon {
         ApprovalOutcome::Pending { id, decision }
     }
 
+    fn set_hook_dirs(&mut self, session_id: &str, dirs: Vec<PathBuf>) {
+        if let Some(entry) = self.sessions.get_mut(session_id) {
+            entry.hook_dirs = dirs;
+        }
+    }
+
+    /// Checks a tool call of a session in the project folder before it runs.
+    /// A call that changes files while the folder is on the base branch (or
+    /// on no branch) asks the branch question, unless the session already
+    /// chose to stay on the base branch. Any other call on a protected path
+    /// makes Claude Code ask, because Claude Code reads files in its own
+    /// folder without asking, and the project folder holds the real secrets
+    /// that a worktree never had. Worktree sessions are not checked here.
+    pub(crate) fn pre_tool_check(&mut self, session_id: &str, tool: &str, summary: &str, input: &Value) -> PreToolOutcome {
+        let Some(entry) = self.sessions.get(session_id) else { return PreToolOutcome::Proceed };
+        if is_finished(&entry.session.status) || entry.session.mode != SessionMode::Project {
+            return PreToolOutcome::Proceed;
+        }
+        let folder = PathBuf::from(&entry.session.worktree);
+        let protected = request_is_protected(summary, input, &folder, PLATFORM) || touches_dirs(summary, input, &entry.hook_dirs, &folder);
+        let base = self.project(&entry.session.project_id).map(|p| p.base_branch);
+        let on_base = match worktree::read_head(&folder) {
+            Some(Head::Branch(branch)) => base.is_some_and(|base| base == branch),
+            Some(Head::Detached) => true,
+            None => false,
+        };
+        if on_base && !entry.session.stay_on_base && changes_files(tool, input) {
+            return self.ask_branch(session_id, tool, summary, input, protected);
+        }
+        if protected {
+            return PreToolOutcome::Ask;
+        }
+        PreToolOutcome::Proceed
+    }
+
+    /// Opens the branch question for a call: a pending approval of kind
+    /// `Branch` that proposes `agent/<slug>`.
+    fn ask_branch(&mut self, session_id: &str, tool: &str, summary: &str, input: &Value, protected: bool) -> PreToolOutcome {
+        let Some(entry) = self.sessions.get(session_id) else { return PreToolOutcome::Proceed };
+        let project_id = entry.session.project_id.clone();
+        let approval = Approval {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            tool: tool.to_string(),
+            summary: summary.to_string(),
+            input: input.clone(),
+            created_at: now_ms(),
+            state: ApprovalState::Pending,
+            decided_by: None,
+            protected,
+            rule_preview: None,
+            kind: ApprovalKind::Branch,
+            branch: Some(format!("agent/{}", worktree::slugify(&entry.session.title))),
+        };
+        self.save_approval(&approval);
+        self.emit(DaemonEvent::ApprovalCreated(approval.clone()));
+        self.approval_event(&approval, "approval.requested", "agent", json!({ "kind": "branch", "branch": approval.branch }));
+        let id = approval.id.clone();
+        let (reply, answer) = oneshot::channel();
+        self.pending.insert(id.clone(), PendingApproval { approval, project_id, rule: Err(OnceOnly::BranchQuestion), reply });
+        self.set_status(session_id, SessionStatus::NeedsYou, "agent");
+        PreToolOutcome::Branch { id, answer, protected }
+    }
+
+    /// For a pending branch question: the folder, the slug for the branch,
+    /// and the project's base branch.
+    fn branch_target(&self, approval_id: &str) -> Option<(PathBuf, String, String)> {
+        let pending = self.pending.get(approval_id).filter(|p| p.approval.kind == ApprovalKind::Branch)?;
+        let session = &self.sessions.get(&pending.approval.session_id)?.session;
+        let base = self.project(&session.project_id)?.base_branch;
+        Some((PathBuf::from(&session.worktree), worktree::slugify(&session.title), base))
+    }
+
+    /// The folder is on a new branch: every session in it shows the branch,
+    /// and the other branch questions there are settled by it, so their
+    /// calls go on through the normal approvals.
+    fn branch_made(&mut self, folder: &Path, branch: &str, answered: &str) {
+        self.folder_branch_changed(folder, branch);
+        let mut settled: Vec<(i64, String)> = self
+            .pending
+            .values()
+            .filter(|p| p.approval.kind == ApprovalKind::Branch && p.approval.id != answered)
+            .filter(|p| self.sessions.get(&p.approval.session_id).is_some_and(|e| Path::new(&e.session.worktree) == folder))
+            .map(|p| (p.approval.created_at, p.approval.id.clone()))
+            .collect();
+        settled.sort();
+        for (_, id) in settled {
+            if let Some((approval, pending)) = self.take_pending(&id, ApprovalState::Cancelled, Some("policy")) {
+                self.approval_event(&approval, "approval.cancelled", "system", json!({ "reason": "branch made", "branch": branch }));
+                let _ = pending.reply.send(Answer::Proceed);
+                self.after_resolution(&approval.session_id, "system");
+            }
+        }
+    }
+
+    /// Reads the branch of a project-mode session's folder, which a session
+    /// or the user may have switched, and shows it on every session there.
+    fn refresh_branch(&mut self, session_id: &str) {
+        let Some(entry) = self.sessions.get(session_id) else { return };
+        if entry.session.mode != SessionMode::Project {
+            return;
+        }
+        let folder = PathBuf::from(&entry.session.worktree);
+        let branch = head_name(worktree::read_head(&folder));
+        self.folder_branch_changed(&folder, &branch);
+    }
+
+    fn folder_branch_changed(&mut self, folder: &Path, branch: &str) {
+        let mut changed: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|e| e.session.mode == SessionMode::Project && Path::new(&e.session.worktree) == folder)
+            .filter(|e| e.session.branch != branch)
+            .map(|e| e.session.id.clone())
+            .collect();
+        changed.sort();
+        for id in changed {
+            if let Some(entry) = self.sessions.get_mut(&id) {
+                entry.session.branch = branch.to_string();
+                let session = entry.session.clone();
+                self.publish(&session);
+            }
+        }
+    }
+
+    fn set_stay_on_base(&mut self, session_id: &str) {
+        if let Some(entry) = self.sessions.get_mut(session_id) {
+            entry.session.stay_on_base = true;
+            let session = entry.session.clone();
+            self.publish(&session);
+        }
+    }
+
     /// Moves a pending approval to its final state. `None` if it was not pending.
     fn take_pending(&mut self, id: &str, state: ApprovalState, decided_by: Option<&str>) -> Option<(Approval, PendingApproval)> {
         let pending = self.pending.remove(id)?;
@@ -929,6 +1149,10 @@ impl Daemon {
     }
 
     pub(crate) fn decide(&mut self, approval_id: &str, decision: Decision) -> Result<Decided, ApiError> {
+        let kind = self.pending.get(approval_id).map(|p| p.approval.kind);
+        if kind == Some(ApprovalKind::Permission) && matches!(decision, Decision::MakeBranch | Decision::StayOnBase) {
+            return Err(ApiError::bad_request("Make branch and Stay on the base branch answer a branch question only."));
+        }
         let state = if decision == Decision::Deny { ApprovalState::Denied } else { ApprovalState::Allowed };
         let Some((approval, pending)) = self.take_pending(approval_id, state, Some("user")) else {
             return match self.resolved.contains(approval_id) {
@@ -958,8 +1182,11 @@ impl Daemon {
             extra["once_only"] = json!(reason);
         }
         self.approval_event(&approval, "approval.decided", "user", extra);
+        if approval.kind == ApprovalKind::Branch && matches!(decision, Decision::StayOnBase | Decision::AllowAlways) {
+            self.set_stay_on_base(&approval.session_id);
+        }
         // The hook may be gone already; then nobody waits for the reply.
-        let _ = pending.reply.send(decision);
+        let _ = pending.reply.send(Answer::Decided(decision));
         self.after_resolution(&approval.session_id, "user");
         Ok(Decided::Resolved(approval))
     }
@@ -1005,6 +1232,79 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// The name a session shows for its folder's branch: the branch, or `HEAD`
+/// when the folder is on no branch.
+fn head_name(head: Option<Head>) -> String {
+    match head {
+        Some(Head::Branch(branch)) => branch,
+        _ => "HEAD".to_string(),
+    }
+}
+
+/// Whether a call changes files: a file edit, or a Bash or PowerShell
+/// command that makes a commit on the current branch.
+fn changes_files(tool: &str, input: &Value) -> bool {
+    if EDIT_TOOLS.contains(&tool) {
+        return true;
+    }
+    let Some(command) = input.get("command").and_then(Value::as_str) else { return false };
+    match tool {
+        "Bash" => commits_on_branch(command),
+        // The command rules are written for Bash, so PowerShell is matched by word.
+        "PowerShell" => {
+            let lower = command.to_lowercase();
+            lower.contains("git") && COMMIT_SUBCOMMANDS.iter().any(|sub| lower.contains(sub))
+        }
+        _ => false,
+    }
+}
+
+/// Whether any git command in `command` has a subcommand that commits on
+/// the current branch ([`COMMIT_SUBCOMMANDS`]), wherever it stands: after
+/// `&&` or `;`, in a subshell, after options such as `git -C <dir>`.
+/// Quotes are dropped, so a quoted `"git" commit` counts too. It errs on
+/// the side of asking: `echo git commit` counts.
+fn commits_on_branch(command: &str) -> bool {
+    let flat: String = command.chars().map(|c| if ";&|()`\n{}".contains(c) { ' ' } else { c }).collect();
+    let words: Vec<String> = flat.split_whitespace().map(|w| w.replace(['"', '\''], "")).collect();
+    words.iter().enumerate().any(|(i, word)| {
+        let program = word.rsplit(['/', '\\']).next().unwrap_or(word).to_lowercase();
+        if program != "git" && program != "git.exe" {
+            return false;
+        }
+        let mut rest = words[i + 1..].iter();
+        while let Some(next) = rest.next() {
+            if GIT_OPTIONS_WITH_VALUE.contains(&next.as_str()) {
+                rest.next();
+            } else if !next.starts_with('-') {
+                return COMMIT_SUBCOMMANDS.contains(&next.to_lowercase().as_str());
+            }
+        }
+        false
+    })
+}
+
+/// Whether a request names a path in one of `dirs` (the repo's hook
+/// folders): a path field inside one, or the summary naming one, by its
+/// path from `folder` or in full. Case-insensitive, and it errs on the side
+/// of protecting.
+fn touches_dirs(summary: &str, input: &Value, dirs: &[PathBuf], folder: &Path) -> bool {
+    if dirs.is_empty() {
+        return false;
+    }
+    let lower = summary.to_lowercase().replace('\\', "/");
+    dirs.iter().any(|dir| {
+        let in_field = PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str)).any(|path| {
+            let path = Path::new(path);
+            let path = if path.is_absolute() { path.to_path_buf() } else { folder.join(path) };
+            path.to_string_lossy().to_lowercase().starts_with(&dir.to_string_lossy().to_lowercase())
+        });
+        let full = dir.to_string_lossy().to_lowercase().replace('\\', "/");
+        let relative = dir.strip_prefix(folder).ok().map(|r| r.to_string_lossy().to_lowercase().replace('\\', "/"));
+        in_field || lower.contains(&full) || relative.is_some_and(|r| !r.is_empty() && lower.contains(&r))
+    })
 }
 
 fn is_finished(status: &SessionStatus) -> bool {
@@ -1076,6 +1376,8 @@ enum OnceOnly {
     /// ending in a dot or a space, a device, a data stream, a drive letter
     /// in a command, or a `\\?\` or `\\.\` prefix.
     WindowsPath,
+    /// A branch question, which answers one call and adds no rule.
+    BranchQuestion,
 }
 
 impl OnceOnly {
@@ -1099,6 +1401,7 @@ impl OnceOnly {
             OnceOnly::UnknownTool => "tool with no known input shape",
             OnceOnly::PowerShell => "PowerShell command, which rules do not cover",
             OnceOnly::WindowsPath => "Windows path form that the rules cannot check",
+            OnceOnly::BranchQuestion => "branch question",
         }
     }
 }
@@ -1509,7 +1812,9 @@ fn rule_allows_on(rule: &AllowRule, tool: &str, input: &Value, worktree: &Path, 
         // Every path in the input must be inside the session's worktree.
         (Some(Scope::Files), None) => PATH_FIELDS.iter().all(|field| match input.get(field) {
             None => true,
-            Some(Value::String(path)) => is_inside(Path::new(path), worktree, platform),
+            Some(Value::String(path)) => {
+                is_inside(Path::new(path), worktree, platform) && !in_worktrees_dir(Path::new(path), worktree, platform)
+            }
             Some(_) => false,
         }),
         // A Bash or WebFetch rule without a prefix would allow anything, and
@@ -1588,7 +1893,31 @@ fn is_plain_command(command: &str, worktree: &Path, platform: Platform) -> bool 
 /// step, and any absolute path in it inside. A URL's `//host` is outside.
 fn stays_in_worktree(part: &str, worktree: &Path, platform: Platform) -> bool {
     let climbs = part.contains("../") || part.ends_with("..");
-    !climbs && absolute_path(part).is_none_or(|path| is_inside(Path::new(path), worktree, platform))
+    !climbs
+        && !starts_in_worktrees_dir(part, platform)
+        && absolute_path(part).is_none_or(|path| {
+            is_inside(Path::new(path), worktree, platform) && !in_worktrees_dir(Path::new(path), worktree, platform)
+        })
+}
+
+/// Whether `path`, below `folder`, is in the folder's [`WORKTREES_DIR`],
+/// which holds the worktrees of other sessions. The name matches in any
+/// case, because macOS and Windows file systems ignore case.
+fn in_worktrees_dir(path: &Path, folder: &Path, platform: Platform) -> bool {
+    let Ok(rest) = path.strip_prefix(folder) else { return false };
+    rest.components().next().is_some_and(|first| is_worktrees_name(&first.as_os_str().to_string_lossy(), platform))
+}
+
+/// Whether a relative part of a command word starts in [`WORKTREES_DIR`]:
+/// `.worktrees/x` or `./.worktrees/x`.
+fn starts_in_worktrees_dir(part: &str, platform: Platform) -> bool {
+    let first = part.trim_start_matches("./").split(path_separators(platform)).next().unwrap_or_default();
+    is_worktrees_name(first, platform)
+}
+
+fn is_worktrees_name(name: &str, platform: Platform) -> bool {
+    let lower = name.to_lowercase();
+    opened_name(&lower, platform) == WORKTREES_DIR
 }
 
 /// Whether, on Windows, `path` can name another file than its text says,
@@ -1742,6 +2071,7 @@ fn is_protected_token(token: &str, platform: Platform) -> bool {
     let name = parts.iter().rev().find(|part| !part.is_empty()).copied().unwrap_or_default();
     name.starts_with(PROTECTED_PREFIX)
         || PROTECTED_EXTENSIONS.iter().any(|extension| name.ends_with(extension))
+        || (name.ends_with(".json") && PROTECTED_JSON_PREFIXES.iter().any(|prefix| name.starts_with(prefix)))
         || parts.iter().any(|part| PROTECTED_NAMES.contains(part))
         || parts.windows(2).any(|pair| pair[0] == CONFIG_DIR && CREDENTIAL_CONFIG_DIRS.contains(&pair[1]))
 }
@@ -2243,11 +2573,14 @@ mod tests {
             "git config --edit",
             "git config edit",
             "git config set core.pager less",
-            "git config --file .git/config core.fsmonitor x",
             "git -C . config core.fsmonitor x",
-            "git --git-dir .git config core.fsmonitor x",
         ] {
             assert_eq!(command_rule(command), Err(OnceOnly::GitConfigWrite), "{command:?}");
+            assert!(!rule_covers("git config", command), "{command:?}");
+        }
+        // Through `.git`, a protected path, they get no rule either.
+        for command in ["git config --file .git/config core.fsmonitor x", "git --git-dir .git config core.fsmonitor x"] {
+            assert_eq!(command_rule(command), Err(OnceOnly::Protected), "{command:?}");
             assert!(!rule_covers("git config", command), "{command:?}");
         }
         assert_eq!(OnceOnly::GitConfigWrite.reason(), "git config change, which can make git run any command");
@@ -3194,8 +3527,11 @@ mod tests {
         assert_eq!(short_form(".env"), form("env", ""));
         assert_eq!(short_form("settings.local.json"), form("settin", "jso"));
         assert_eq!(short_form("my file.tar.gz"), form("myfile", "gz"));
-        assert_eq!(protected_short_starts(), ["ss", "aw", "gn", "ku", "do", "ne", "gi", "np", "py", "cl", "mc", "en", "co"]);
-        assert_eq!(protected_short_extensions(), ["jso", "pem", "key"]);
+        assert_eq!(
+            protected_short_starts(),
+            ["ss", "aw", "gn", "ku", "do", "ne", "gi", "np", "py", "cl", "mc", "gi", "ke", "en", "co"]
+        );
+        assert_eq!(protected_short_extensions(), ["jso", "pro", "pem", "key", "jks", "p12", "pfx", "key", "p8"]);
     }
 
     /// The check reads text only, so the Windows rules run on every platform.
@@ -3436,5 +3772,99 @@ mod tests {
         assert_eq!(session_title("\n\n  Second line wins\n"), "Second line wins");
         assert_eq!(session_title(&"é".repeat(100)).chars().count(), 80);
         assert_eq!(session_title(""), "");
+    }
+
+    #[test]
+    fn commits_are_found_anywhere_in_a_command() {
+        for command in [
+            "git commit -m fix",
+            "git add -A && git commit -m \"fix\"",
+            "git -C /repo commit --amend",
+            "git -c user.name=x commit -m y",
+            "cd sub; git merge topic",
+            "git cherry-pick abc",
+            "git revert HEAD",
+            "git pull --rebase",
+            "git am < patch",
+            "git rebase main",
+            "(git commit -m x)",
+            "/usr/bin/git commit -m x",
+            "\"git\" commit -m x",
+        ] {
+            assert!(commits_on_branch(command), "{command:?}");
+        }
+        for command in ["git status", "git log --grep=commit", "git diff && echo done", "npm test", "git -C commit status", "gitk"] {
+            assert!(!commits_on_branch(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn file_edits_and_commits_change_files() {
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(changes_files(tool, &json!({ "file_path": "/r/a.rs" })), "{tool}");
+        }
+        assert!(changes_files("Bash", &json!({ "command": "git add . && git commit -m x" })));
+        assert!(changes_files("PowerShell", &json!({ "command": "git commit -m x" })));
+        assert!(!changes_files("Bash", &json!({ "command": "ls" })));
+        assert!(!changes_files("Read", &json!({ "file_path": "/r/a.rs" })));
+        assert!(!changes_files("Bash", &json!({})));
+    }
+
+    #[test]
+    fn hook_folders_are_found_in_paths_and_commands() {
+        let folder = Path::new(W);
+        let dirs = vec![folder.join(".husky").join("_"), folder.join(".husky")];
+        let edit = |path: &str| json!({ "file_path": path });
+        let inside = folder.join(".husky").join("pre-commit").to_string_lossy().into_owned();
+        assert!(touches_dirs(&inside, &edit(&inside), &dirs, folder));
+        assert!(touches_dirs("echo x >> .husky/pre-commit", &json!({ "command": "echo x >> .husky/pre-commit" }), &dirs, folder));
+        assert!(touches_dirs(".HUSKY/pre-commit", &edit(".HUSKY/pre-commit"), &dirs, folder));
+        let src = folder.join("src").join("a.rs").to_string_lossy().into_owned();
+        assert!(!touches_dirs(&src, &edit(&src), &dirs, folder));
+        assert!(!touches_dirs(&inside, &edit(&inside), &[], folder));
+    }
+
+    #[test]
+    fn rules_never_reach_into_the_worktrees_folder() {
+        let folder = PathBuf::from(W);
+        let other = folder.join(".worktrees").join("other").join("a.rs");
+        let rule = AllowRule { tool: "Edit".into(), prefix: None };
+        let edit = |path: &Path| json!({ "file_path": path.to_string_lossy() });
+        assert!(rule_allows(&rule, "Edit", &edit(&folder.join("src").join("a.rs")), &folder));
+        assert!(!rule_allows(&rule, "Edit", &edit(&other), &folder));
+        assert!(!rule_allows(&rule, "Edit", &edit(&folder.join(".Worktrees").join("x")), &folder));
+        assert!(rule_covers("rm -f", "rm -f build.log"));
+        assert!(!rule_covers("rm -f", "rm -f .worktrees/other/a.rs"));
+        assert!(!rule_covers("rm -f", "rm -f ./.worktrees/other/a.rs"));
+        let absolute = format!("rm -f {}", other.to_string_lossy());
+        assert!(!allows_command(&bash_rule("rm -f"), &absolute));
+    }
+
+    #[test]
+    fn git_folder_keystores_and_credentials_are_protected() {
+        for path in [
+            ".git/hooks/pre-commit",
+            ".git/config",
+            "android/key.properties",
+            "android/app/release.jks",
+            "certs/dev.p12",
+            "certs/dev.pfx",
+            "upload.keystore",
+            "AuthKey_X.p8",
+            "credentials.json",
+            "config/service-account-prod.json",
+        ] {
+            assert!(touches_protected_path(path, Path::new(W), PLATFORM), "{path}");
+        }
+        for path in [".gitignore", ".github/workflows/ci.yml", ".gitattributes", "src/credentials.rs", "keys.json", "git/x"] {
+            assert!(!touches_protected_path(path, Path::new(W), PLATFORM), "{path}");
+        }
+    }
+
+    #[test]
+    fn head_names_fall_back_to_head() {
+        assert_eq!(head_name(Some(Head::Branch("main".into()))), "main");
+        assert_eq!(head_name(Some(Head::Detached)), "HEAD");
+        assert_eq!(head_name(None), "HEAD");
     }
 }

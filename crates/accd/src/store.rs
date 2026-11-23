@@ -204,6 +204,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acc_protocol::{ApprovalKind, SessionMode};
     use serde_json::json;
 
     fn ev(session: Option<&str>, kind: &str) -> NewEvent {
@@ -212,7 +213,8 @@ mod tests {
     fn session(id: &str, status: SessionStatus) -> Session {
         Session {
             id: id.into(), project_id: "p1".into(), agent: "claude".into(), title: "t".into(), branch: "agent/x".into(),
-            worktree: "/w".into(), status, status_since: 10, started_at: 5, ended_at: None, exit_code: None,
+            worktree: "/w".into(), mode: SessionMode::Worktree, stay_on_base: false, status, status_since: 10, started_at: 5,
+            ended_at: None, exit_code: None,
             history: vec![StatusChange { status: SessionStatus::Starting, at: 5 }],
         }
     }
@@ -220,6 +222,7 @@ mod tests {
         Approval {
             id: id.into(), session_id: "s1".into(), tool: "Bash".into(), summary: "ls".into(), input: json!({"command": "ls"}),
             created_at: 1, state, decided_by: None, protected: false, rule_preview: Some("`ls` commands".into()),
+            kind: ApprovalKind::Permission, branch: None,
         }
     }
 
