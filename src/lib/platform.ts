@@ -32,12 +32,19 @@ export interface KeyHints {
   palette: string;
   /** `null` where the jump has no key. */
   nextNeeds: string | null;
+  /** Text size up, down and back to 100%. */
+  textSize: { bigger: string; smaller: string; reset: string };
 }
 
 /**
  * The shortcut hints the UI shows. Ctrl+K opens the palette on every platform. Cmd+J
  * has no key on Windows and Linux: Ctrl+J is a newline in the session terminal.
+ * The text size keys are Cmd or Ctrl with =, - and 0.
  */
 export function keyHints(on: Platform): KeyHints {
-  return on === 'mac' ? { palette: '⌘K', nextNeeds: '⌘J' } : { palette: 'Ctrl+K', nextNeeds: null };
+  const mod = on === 'mac' ? '⌘' : 'Ctrl+';
+  const textSize = { bigger: `${mod}=`, smaller: `${mod}-`, reset: `${mod}0` };
+  return on === 'mac'
+    ? { palette: '⌘K', nextNeeds: '⌘J', textSize }
+    : { palette: 'Ctrl+K', nextNeeds: null, textSize };
 }

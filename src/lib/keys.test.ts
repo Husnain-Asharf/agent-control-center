@@ -45,6 +45,21 @@ describe('matchShortcut', () => {
     expect(matchShortcut(key('g', { ctrl: true }), false)).toBeNull();
     expect(matchShortcut(key('o', { meta: true }), true)).toBeNull();
   });
+  it.each([
+    ['=', 'text-bigger'],
+    ['+', 'text-bigger'],
+    ['-', 'text-smaller'],
+    ['0', 'text-reset'],
+  ])('Cmd or Ctrl with %s gives %s', (k, action) => {
+    expect(matchShortcut(key(k, { meta: true }), false)).toEqual({ action });
+    expect(matchShortcut(key(k, { ctrl: true }), false)).toEqual({ action });
+  });
+  it('text size keys need Cmd or Ctrl, and Ctrl with _ stays with the terminal', () => {
+    expect(matchShortcut(key('='), false)).toBeNull();
+    expect(matchShortcut(key('-'), false)).toBeNull();
+    expect(matchShortcut(key('0'), false)).toBeNull();
+    expect(matchShortcut(key('_', { ctrl: true, shift: true }), false)).toBeNull();
+  });
 });
 
 type Stub = { tagName?: string; isContentEditable?: boolean; closest?: (s: string) => unknown };
@@ -87,6 +102,10 @@ describe('shortcutAllowed', () => {
     expect(shortcutAllowed('next-needs', { ...free, typing: true })).toBe(true);
     expect(shortcutAllowed('next-needs', { ...free, dialogOpen: true })).toBe(false);
     expect(shortcutAllowed('next-needs', { ...free, paletteOpen: true })).toBe(false);
+  });
+  it.each(['text-bigger', 'text-smaller', 'text-reset'])('%s works everywhere', (a) => {
+    expect(shortcutAllowed(a, free)).toBe(true);
+    expect(shortcutAllowed(a, { typing: true, dialogOpen: true, paletteOpen: true })).toBe(true);
   });
   it.each(['new-session', 'arm-g', 'go:sessions'])('plain %s needs free focus and no dialog', (a) => {
     expect(shortcutAllowed(a, free)).toBe(true);

@@ -39,11 +39,16 @@ describe('platformOf', () => {
 
 describe('keyHints', () => {
   it('shows the Cmd keys on macOS', () => {
-    expect(keyHints('mac')).toEqual({ palette: '⌘K', nextNeeds: '⌘J' });
+    expect(keyHints('mac')).toEqual({
+      palette: '⌘K',
+      nextNeeds: '⌘J',
+      textSize: { bigger: '⌘=', smaller: '⌘-', reset: '⌘0' },
+    });
   });
   it('shows Ctrl+K on Windows and Linux, and no key for the jump', () => {
-    expect(keyHints('windows')).toEqual({ palette: 'Ctrl+K', nextNeeds: null });
-    expect(keyHints('linux')).toEqual({ palette: 'Ctrl+K', nextNeeds: null });
+    const ctrl = { palette: 'Ctrl+K', nextNeeds: null, textSize: { bigger: 'Ctrl+=', smaller: 'Ctrl+-', reset: 'Ctrl+0' } };
+    expect(keyHints('windows')).toEqual(ctrl);
+    expect(keyHints('linux')).toEqual(ctrl);
   });
   it('names keys that work', () => {
     const press = (key: string, mods: { metaKey?: boolean; ctrlKey?: boolean }) => ({
@@ -58,5 +63,10 @@ describe('keyHints', () => {
     expect(matchShortcut(press('k', { ctrlKey: true }), false)).toEqual({ action: 'palette' });
     // Ctrl+J stays with the terminal.
     expect(matchShortcut(press('j', { ctrlKey: true }), false)).toBeNull();
+    for (const mods of [{ metaKey: true }, { ctrlKey: true }]) {
+      expect(matchShortcut(press('=', mods), false)).toEqual({ action: 'text-bigger' });
+      expect(matchShortcut(press('-', mods), false)).toEqual({ action: 'text-smaller' });
+      expect(matchShortcut(press('0', mods), false)).toEqual({ action: 'text-reset' });
+    }
   });
 });

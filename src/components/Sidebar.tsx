@@ -11,6 +11,7 @@ const NAV: { route: RouteName; hash: string; label: string; icon: IconName }[] =
   { route: 'projects', hash: '#projects', label: 'Projects', icon: 'projects' },
   { route: 'approvals', hash: '#approvals', label: 'Approvals', icon: 'approvals' },
   { route: 'activity', hash: '#activity', label: 'Activity', icon: 'activity' },
+  { route: 'settings', hash: '#settings', label: 'Settings', icon: 'settings' },
 ];
 
 export function Sidebar() {

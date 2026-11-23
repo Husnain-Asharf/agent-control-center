@@ -12,4 +12,9 @@ describe('default capability', () => {
     // data-tauri-drag-region calls start_dragging, which core:window:default does not allow.
     expect(capability.permissions).toContain('core:window:allow-start-dragging');
   });
+
+  it('lets Settings zoom the webview for the text size', () => {
+    // setZoom calls set_webview_zoom, which core:webview:default does not allow.
+    expect(capability.permissions).toContain('core:webview:allow-set-webview-zoom');
+  });
 });

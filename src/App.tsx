@@ -18,6 +18,8 @@ import { ProjectPage, Projects } from './screens/Projects';
 import { SessionView } from './screens/SessionView';
 import { Sessions } from './screens/Sessions';
 import { Approvals } from './screens/Approvals';
+import { Settings } from './screens/Settings';
+import { DEFAULT_TEXT_SCALE, stepTextScale } from './lib/appearance';
 import { decide, isProtectedApproval, jumpToOldest, wantsVerb } from './lib/approvals';
 import { go, useRoute } from './lib/route';
 import { NewSessionDialog, onOpenNewSession, openNewSession } from './dialogs/NewSessionDialog';
@@ -35,6 +37,7 @@ const TITLES = {
   projects: 'Projects',
   project: 'Project',
   activity: 'Activity',
+  settings: 'Settings',
 } as const;
 
 function Screen() {
@@ -46,6 +49,7 @@ function Screen() {
   if (route.name === 'sessions') return <Sessions />;
   if (route.name === 'session') return <SessionView />;
   if (route.name === 'approvals') return <Approvals />;
+  if (route.name === 'settings') return <Settings />;
   // Placeholders. Later tasks replace these with the real screens.
   return (
     <div style={{ padding: '32px 36px' }}>
@@ -85,6 +89,10 @@ export default function App() {
       if (hit.action === 'palette') setPaletteOpen((o) => !o);
       else if (hit.action === 'new-session') openNewSession();
       else if (hit.action === 'next-needs') jumpToOldest();
+      else if (hit.action === 'text-bigger' || hit.action === 'text-smaller') {
+        const { textScale, setTextScale } = useStore.getState();
+        setTextScale(stepTextScale(textScale, hit.action === 'text-bigger' ? 1 : -1));
+      } else if (hit.action === 'text-reset') useStore.getState().setTextScale(DEFAULT_TEXT_SCALE);
       else if (hit.action === 'arm-g') {
         gArmed.current = true;
         gTimer.current = window.setTimeout(disarm, 1500);

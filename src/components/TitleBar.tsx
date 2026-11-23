@@ -20,7 +20,11 @@ export function TitleBar() {
   // children, so each empty area of the bar carries it. The buttons stay clickable.
   return (
     <header className="titlebar" data-tauri-drag-region>
-      <div className="traffic" data-tauri-drag-region style={isMac ? { paddingLeft: TRAFFIC_LIGHTS_INSET } : undefined} />
+      <div
+        className={isMac ? 'traffic traffic--mac' : 'traffic'}
+        data-tauri-drag-region
+        style={isMac ? { paddingLeft: TRAFFIC_LIGHTS_INSET } : undefined}
+      />
       <button className="search" type="button" data-action="palette" aria-label="Search or run a command" onClick={openPalette}>
         <Icon name="search" />
         <span>Search or run a command</span>

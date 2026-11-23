@@ -1,4 +1,13 @@
 import { create } from 'zustand';
+import {
+  applyTextScale,
+  parseBolder,
+  parseTermFontSize,
+  parseTextScale,
+  setBolderAttr,
+  type TermFontSize,
+  type TextScale,
+} from '../lib/appearance';
 import type {
   Approval,
   DaemonEvent,
@@ -13,6 +22,9 @@ import type {
 export const MAX_EVENTS = 500;
 const THEME_KEY = 'acc-theme';
 const SOUND_KEY = 'acc-sound';
+const TEXT_SCALE_KEY = 'acc-text-scale';
+const TERM_FONT_KEY = 'acc-term-font-size';
+const BOLDER_KEY = 'acc-bolder';
 
 export interface State {
   connected: boolean;
@@ -29,6 +41,11 @@ export interface State {
   toasts: Toast[];
   theme: Theme;
   soundEnabled: boolean;
+  /** Page zoom of the whole window. */
+  textScale: TextScale;
+  /** Font size of session terminals, in CSS pixels. */
+  termFontSize: TermFontSize;
+  bolder: boolean;
   applySnapshot: (s: Snapshot) => void;
   applyEvent: (e: DaemonEvent) => void;
   setConnected: (b: boolean, error?: string | null) => void;
@@ -36,28 +53,38 @@ export interface State {
   dismissToast: (id: number) => void;
   toggleTheme: () => void;
   toggleSound: () => void;
+  setTextScale: (scale: TextScale) => void;
+  setTermFontSize: (size: TermFontSize) => void;
+  toggleBolder: () => void;
 }
 
 const byId = <T extends { id: string }>(list: T[]): Record<string, T> =>
   Object.fromEntries(list.map((x) => [x.id, x]));
 
-function readTheme(): Theme {
+/** A saved value, or null when there is none or no storage. */
+function readSaved(key: string): string | null {
   try {
-    const saved = localStorage.getItem(THEME_KEY);
-    if (saved === 'light' || saved === 'dark') return saved;
+    return localStorage.getItem(key);
   } catch {
     // no storage (tests, private mode)
+    return null;
   }
-  return 'dark';
 }
 
-function readSound(): boolean {
+function save(key: string, value: string) {
   try {
-    return localStorage.getItem(SOUND_KEY) !== 'off';
+    localStorage.setItem(key, value);
   } catch {
-    return true;
+    // ignore
   }
 }
+
+function readTheme(): Theme {
+  const saved = readSaved(THEME_KEY);
+  return saved === 'light' || saved === 'dark' ? saved : 'dark';
+}
+
+const readSound = (): boolean => readSaved(SOUND_KEY) !== 'off';
 
 function setThemeAttr(theme: Theme) {
   if (typeof document !== 'undefined') document.documentElement.dataset.theme = theme;
@@ -65,18 +92,18 @@ function setThemeAttr(theme: Theme) {
 
 function applyTheme(theme: Theme) {
   setThemeAttr(theme);
-  try {
-    localStorage.setItem(THEME_KEY, theme);
-  } catch {
-    // ignore
-  }
+  save(THEME_KEY, theme);
 }
 
 let toastSeq = 0;
 
-// Put the saved theme on <html> before the first render.
+// Put the saved theme and text weight on <html>, and zoom to the saved text size, before the first render.
 const initialTheme = readTheme();
 setThemeAttr(initialTheme);
+const initialBolder = parseBolder(readSaved(BOLDER_KEY));
+setBolderAttr(initialBolder);
+const initialTextScale = parseTextScale(readSaved(TEXT_SCALE_KEY));
+applyTextScale(initialTextScale);
 
 export const useStore = create<State>()((set) => ({
   connected: false,
@@ -89,6 +116,9 @@ export const useStore = create<State>()((set) => ({
   toasts: [],
   theme: initialTheme,
   soundEnabled: readSound(),
+  textScale: initialTextScale,
+  termFontSize: parseTermFontSize(readSaved(TERM_FONT_KEY)),
+  bolder: initialBolder,
 
   applySnapshot: (s) =>
     set({
@@ -141,12 +171,27 @@ export const useStore = create<State>()((set) => ({
   toggleSound: () =>
     set((st) => {
       const soundEnabled = !st.soundEnabled;
-      try {
-        localStorage.setItem(SOUND_KEY, soundEnabled ? 'on' : 'off');
-      } catch {
-        // ignore
-      }
+      save(SOUND_KEY, soundEnabled ? 'on' : 'off');
       return { soundEnabled };
+    }),
+
+  setTextScale: (textScale) => {
+    applyTextScale(textScale);
+    save(TEXT_SCALE_KEY, String(textScale));
+    set({ textScale });
+  },
+
+  setTermFontSize: (termFontSize) => {
+    save(TERM_FONT_KEY, String(termFontSize));
+    set({ termFontSize });
+  },
+
+  toggleBolder: () =>
+    set((st) => {
+      const bolder = !st.bolder;
+      setBolderAttr(bolder);
+      save(BOLDER_KEY, bolder ? 'on' : 'off');
+      return { bolder };
     }),
 }));
 

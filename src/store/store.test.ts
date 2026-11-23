@@ -186,6 +186,65 @@ describe('sound setting', () => {
   });
 });
 
+describe('text settings', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  const load = async (saved: Record<string, string> | null) => {
+    const writes: Record<string, string> = {};
+    const root = { dataset: {} as Record<string, string> };
+    vi.stubGlobal('document', { documentElement: root });
+    vi.stubGlobal(
+      'localStorage',
+      saved && {
+        getItem: (k: string) => saved[k] ?? null,
+        setItem: (k: string, v: string) => {
+          writes[k] = v;
+        },
+      },
+    );
+    vi.resetModules();
+    return { fresh: await import('./store'), writes, root };
+  };
+
+  it('reads saved values and marks <html> for bolder text', async () => {
+    const { fresh, root } = await load({ 'acc-text-scale': '1.25', 'acc-term-font-size': '14', 'acc-bolder': 'on' });
+    const s = fresh.useStore.getState();
+    expect([s.textScale, s.termFontSize, s.bolder]).toEqual([1.25, 14, true]);
+    expect('bolder' in root.dataset).toBe(true);
+  });
+
+  it('falls back to the defaults for invalid or old values', async () => {
+    const { fresh, root } = await load({ 'acc-text-scale': '1.5', 'acc-term-font-size': 'big', 'acc-bolder': 'yes' });
+    const s = fresh.useStore.getState();
+    expect([s.textScale, s.termFontSize, s.bolder]).toEqual([1, 12.5, false]);
+    expect('bolder' in root.dataset).toBe(false);
+  });
+
+  it('uses the defaults without storage', async () => {
+    const { fresh } = await load(null);
+    const s = fresh.useStore.getState();
+    expect([s.textScale, s.termFontSize, s.bolder]).toEqual([1, 12.5, false]);
+  });
+
+  it('saves changes', async () => {
+    const { fresh, writes, root } = await load({});
+    const { setTextScale, setTermFontSize, toggleBolder } = fresh.useStore.getState();
+    setTextScale(1.1);
+    setTermFontSize(16);
+    toggleBolder();
+    const s = fresh.useStore.getState();
+    expect([s.textScale, s.termFontSize, s.bolder]).toEqual([1.1, 16, true]);
+    expect(writes).toEqual({ 'acc-text-scale': '1.1', 'acc-term-font-size': '16', 'acc-bolder': 'on' });
+    expect('bolder' in root.dataset).toBe(true);
+    fresh.useStore.getState().toggleBolder();
+    expect(writes['acc-bolder']).toBe('off');
+    expect('bolder' in root.dataset).toBe(false);
+  });
+});
+
 describe('connEpoch', () => {
   it('increments on false to true and not on true to true', () => {
     const { setConnected } = useStore.getState();

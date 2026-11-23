@@ -38,6 +38,10 @@ export function matchShortcut(e: KeyInfo, pendingG: boolean): Shortcut | null {
   if (e.metaKey || e.ctrlKey) {
     if (key === 'k') return { action: 'palette' };
     if (key === 'j' && e.metaKey) return { action: 'next-needs' };
+    // `+` is shift and `=` on a US keyboard. Ctrl with `_` stays with the terminal.
+    if (key === '=' || key === '+') return { action: 'text-bigger' };
+    if (key === '-') return { action: 'text-smaller' };
+    if (key === '0') return { action: 'text-reset' };
     return null;
   }
   if (pendingG) return GO[key] ? { action: GO[key] } : null;
@@ -67,8 +71,10 @@ export interface ShortcutContext {
  * Whether the global handler may run an action now.
  * Cmd/Ctrl+K works from inputs and toggles the palette, but not over another dialog.
  * Cmd+J works from inputs but not over any dialog. Plain keys need a free focus and no dialog.
+ * The text size keys work everywhere: inputs and the terminal do nothing with them.
  */
 export function shortcutAllowed(action: string, ctx: ShortcutContext): boolean {
+  if (action.startsWith('text-')) return true;
   if (action === 'palette') return !ctx.dialogOpen;
   if (ctx.dialogOpen || ctx.paletteOpen) return false;
   if (action === 'next-needs') return true;

@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
+import { termFontWeight } from '../lib/appearance';
 import { b64ToBytes, bytesToB64 } from '../lib/b64';
 import { request } from '../lib/ipc';
 import { subscribeOutput } from '../lib/outputBus';
@@ -28,14 +29,19 @@ const encoder = new TextEncoder();
 export function TerminalView({ sessionId }: { sessionId: string }) {
   const host = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const sendSizeRef = useRef<(() => void) | null>(null);
   const theme = useStore((s) => s.theme);
+  const fontSize = useStore((s) => s.termFontSize);
+  const bolder = useStore((s) => s.bolder);
 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
+    const settings = useStore.getState();
     const term = new Terminal({
       fontFamily: '"Geist Mono", ui-monospace, Menlo, monospace',
-      fontSize: 12.5,
+      fontSize: settings.termFontSize,
+      fontWeight: termFontWeight(settings.bolder),
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: true,
@@ -71,6 +77,7 @@ export function TerminalView({ sessionId }: { sessionId: string }) {
     };
 
     sendSize();
+    sendSizeRef.current = sendSize;
     request<{ scrollback_b64: string; end: number }>('session_attach', { session_id: sessionId })
       .then((r) => {
         if (disposed) return;
@@ -99,6 +106,7 @@ export function TerminalView({ sessionId }: { sessionId: string }) {
       binary.dispose();
       off();
       termRef.current = null;
+      sendSizeRef.current = null;
       term.dispose();
     };
   }, [sessionId]);
@@ -108,6 +116,17 @@ export function TerminalView({ sessionId }: { sessionId: string }) {
     const term = termRef.current;
     if (term) term.options.theme = termTheme();
   }, [theme]);
+
+  // A new font size or weight from Settings changes the cell size, so refit and send the
+  // new columns and rows to the daemon.
+  useEffect(() => {
+    const term = termRef.current;
+    const fontWeight = termFontWeight(bolder);
+    if (!term || (term.options.fontSize === fontSize && term.options.fontWeight === fontWeight)) return;
+    term.options.fontSize = fontSize;
+    term.options.fontWeight = fontWeight;
+    sendSizeRef.current?.();
+  }, [fontSize, bolder]);
 
   return (
     <div className="well terminal" role="log" aria-label="Terminal" style={{ padding: 8, overflow: 'hidden' }}>

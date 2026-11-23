@@ -90,6 +90,8 @@ sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db "DELETE FROM ru
 |-----|--------|
 | `Cmd+K` (`Ctrl+K` on Linux and Windows) | Open the command palette |
 | `Cmd+J` (macOS only) | Jump to the next session that needs you |
+| `Cmd+=` and `Cmd+-` (`Ctrl+=` and `Ctrl+-` on Linux and Windows) | Make the text bigger or smaller |
+| `Cmd+0` (`Ctrl+0` on Linux and Windows) | Set the text size back to 100% |
 | `n` | New session |
 | `g` then `o` | Go to Overview |
 | `g` then `s` | Go to Sessions |
@@ -97,7 +99,7 @@ sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db "DELETE FROM ru
 | `g` then `p` | Go to Projects |
 | `g` then `a` | Go to Activity |
 
-Plain keys do not fire while you type in an input, the terminal or a dialog. Linux and Windows have no key for the jump, because `Ctrl+J` is a newline in the session's terminal: click the "needs you" button in the title bar instead.
+Plain keys do not fire while you type in an input, the terminal or a dialog. Linux and Windows have no key for the jump, because `Ctrl+J` is a newline in the session's terminal: click the "needs you" button in the title bar instead. The text size keys work everywhere, also in the terminal, which does not use them. The Settings screen has the same text size, and a separate one for the terminal.
 
 ## Data and privacy
 

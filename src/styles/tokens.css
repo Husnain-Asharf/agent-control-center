@@ -8,9 +8,16 @@
 :root {
   --font-ui: "Geist", "SF Pro Text", system-ui, sans-serif;
   --font-code: "Geist Mono", ui-monospace, Menlo, monospace;
+  /* Weights. index.html loads Geist at 400 to 700 and Geist Mono at 400 to 600.
+     Code text inherits the first two; semibold code uses --w-code-semibold. */
+  --w-regular: 400; --w-medium: 500; --w-semibold: 600;
+  --w-code-semibold: 600;
   --r-sm: 5px; --r-md: 7px; --r-lg: 12px;
   --ease: cubic-bezier(.2, .7, .2, 1);
 }
+/* Bolder text (Settings) raises each weight one step. Code stays at 600, the
+   heaviest Geist Mono that is loaded, so no bold is faked. */
+:root[data-bolder] { --w-regular: 500; --w-medium: 600; --w-semibold: 700; }
 :root, :root[data-theme="dark"] {
   --chrome: #101417; --panel: #13181C; --raised: #1A2025; --hover: #20272D;
   --well: #0A0D10; --well-hover: #0F1317;

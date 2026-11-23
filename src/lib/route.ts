@@ -7,14 +7,15 @@ export type RouteName =
   | 'approvals'
   | 'projects'
   | 'project'
-  | 'activity';
+  | 'activity'
+  | 'settings';
 
 export interface Route {
   name: RouteName;
   param: string | null;
 }
 
-const NAMES: RouteName[] = ['overview', 'sessions', 'session', 'approvals', 'projects', 'project', 'activity'];
+const NAMES: RouteName[] = ['overview', 'sessions', 'session', 'approvals', 'projects', 'project', 'activity', 'settings'];
 
 export function parseHash(hash: string): Route {
   const [head, ...rest] = hash.replace(/^#\/?/, '').split('/');
