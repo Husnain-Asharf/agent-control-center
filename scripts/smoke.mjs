@@ -464,7 +464,7 @@ async function main_() {
 
   // 1. worktree and branch
   const ok1 = await item(1, async () => {
-    session = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK, mode: 'worktree' });
+    session = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK, mode: 'worktree', send_task: true });
     new Tracker(main, session.id, onChunk);
     const slug = session.branch.replace(/^agent\//, '');
     if (!session.branch.startsWith('agent/') || !slug) throw new Error(`branch is ${session.branch}`);
@@ -485,7 +485,7 @@ async function main_() {
   let folderSession = null;
   const ok10 = await item(10, async () => {
     const branchesBefore = git(repo, 'branch', '--list', 'agent/*');
-    folderSession = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK });
+    folderSession = await main.call('session_start', { project_id: project.id, agent: 'claude', task: TASK, send_task: true });
     if (folderSession.mode !== 'project') throw new Error(`mode is ${folderSession.mode}`);
     if (realpath(folderSession.worktree) !== realpath(repo)) throw new Error(`folder is ${folderSession.worktree}`);
     const head = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD');

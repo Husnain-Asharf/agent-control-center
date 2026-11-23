@@ -34,6 +34,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
   const [projectId, setProjectId] = useState(preset ?? '');
   const [task, setTask] = useState('');
   const [separate, setSeparate] = useState(false);
+  const [sendTask, setSendTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -55,6 +56,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         agent: 'claude',
         task: task.trim(),
         mode: separate ? 'worktree' : 'project',
+        send_task: sendTask,
       });
       onClose();
       go(`#session/${session.id}`);
@@ -87,7 +89,7 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
         </select>
       </label>
       <label className="field">
-        <span>Task</span>
+        <span>Description</span>
         <textarea
           name="task"
           rows={3}
@@ -95,8 +97,12 @@ export function NewSessionDialog({ onClose }: { onClose: () => void }) {
           data-autofocus
           value={task}
           onChange={(e) => setTask(e.target.value)}
-          placeholder="For example: add pagination to the orders endpoint"
+          placeholder="For example: orders endpoint pagination. It names the session; Claude waits for you."
         />
+      </label>
+      <label className="check">
+        <input type="checkbox" name="send" checked={sendTask} onChange={(e) => setSendTask(e.target.checked)} />
+        Also send it to Claude as the first message
       </label>
       <label className="check">
         <input type="checkbox" name="separate" checked={separate} onChange={(e) => setSeparate(e.target.checked)} />

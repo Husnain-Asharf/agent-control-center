@@ -82,6 +82,7 @@ export function ProjectPage() {
   const { param } = useRoute();
   const pushToast = useStore((s) => s.pushToast);
   const [removing, setRemoving] = useState(false);
+  const [base, setBase] = useState<string | null>(null);
   const project = useStore((s) => (param ? s.projects[param] : undefined));
   const projects = useStore((s) => s.projects);
   const sessions = useStore((s) => s.sessions);
@@ -124,7 +125,10 @@ export function ProjectPage() {
             <code>{project.path}</code>
             {project.host && <span>{project.host}</span>}
             <span>
-              Base branch <code>{project.base_branch}</code>
+              Base branch <code>{project.base_branch}</code>{' '}
+              <button className="link" type="button" onClick={() => setBase(project.base_branch)}>
+                Change
+              </button>
             </span>
           </p>
         </div>
@@ -139,6 +143,33 @@ export function ProjectPage() {
           </button>
         </div>
       </div>
+      {base !== null && (
+        <Dialog
+          title="Base branch"
+          onClose={() => setBase(null)}
+          onSubmit={() =>
+            request('project_set_base', { project_id: project.id, base_branch: base })
+              .then(() => setBase(null))
+              .catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }))
+          }
+        >
+          <p className="muted">
+            Sessions in the project folder ask before they change this branch. The remote's default branch counts too.
+          </p>
+          <label className="field">
+            <span>Branch</span>
+            <input className="field-input" value={base} data-autofocus onChange={(e) => setBase(e.target.value)} />
+          </label>
+          <div className="dialog-actions">
+            <button type="button" className="btn btn--ghost" onClick={() => setBase(null)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn--primary" disabled={base.trim() === ''}>
+              Save
+            </button>
+          </div>
+        </Dialog>
+      )}
       {removing && (
         <Dialog
           title="Remove project"

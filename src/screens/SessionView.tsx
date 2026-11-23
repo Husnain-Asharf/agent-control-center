@@ -10,6 +10,7 @@ import { Dialog } from '../components/Dialog';
 import { go } from '../lib/route';
 import type { SessionRemoved } from '../lib/types';
 import { request } from '../lib/ipc';
+import { bytesToB64 } from '../lib/b64';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
 import { pendingForSession, useStore } from '../store/store';
@@ -96,6 +97,25 @@ export function SessionView() {
           <button className="btn btn--danger" type="button" disabled={!running} onClick={() => act('session_stop')}>
             Stop
           </button>
+          {running && (
+            <button
+              className="btn"
+              type="button"
+              disabled={session.status !== 'idle'}
+              title={
+                session.status === 'idle'
+                  ? 'Sends /compact: Claude Code sums up the conversation so far, which frees context'
+                  : 'Compact works when the session is idle'
+              }
+              onClick={() =>
+                request('session_input', { session_id: session.id, data_b64: bytesToB64(new TextEncoder().encode('/compact\r')) })
+                  .then(() => pushToast({ msg: `Compacting ${session.title}.`, kind: 'working' }))
+                  .catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }))
+              }
+            >
+              Compact
+            </button>
+          )}
           {!running && (
             <button className="btn btn--ghost" type="button" onClick={() => setRemoving(true)}>
               Remove
@@ -134,7 +154,20 @@ export function SessionView() {
           {session.mode === 'project' && session.stay_on_base && (
             <div>
               <dt>Base branch</dt>
-              <dd title="You chose Allow on the base branch, so this session is not asked again">Changes allowed</dd>
+              <dd title="You chose Allow on the base branch, so this session is not asked again">
+                Changes allowed{' '}
+                <button
+                  className="link"
+                  type="button"
+                  onClick={() =>
+                    request('session_reset_base', { session_id: session.id }).catch((e: unknown) =>
+                      pushToast({ msg: errorText(e), kind: 'failed' }),
+                    )
+                  }
+                >
+                  Ask again
+                </button>
+              </dd>
             </div>
           )}
           {session.usage && (

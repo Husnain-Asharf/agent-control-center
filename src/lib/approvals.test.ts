@@ -4,6 +4,7 @@ import {
   alwaysAllowState,
   approvalKey,
   decide,
+  branchQuestionBase,
   decisionFor,
   decisionKeyAllowed,
   decisionKeysReady,
@@ -50,6 +51,14 @@ describe('wantsVerb', () => {
     expect(wantsVerb('MultiEdit')).toBe('edit');
     expect(wantsVerb('Write')).toBe('edit');
     expect(wantsVerb('WebFetch')).toBe('use WebFetch');
+  });
+});
+
+describe('branchQuestionBase', () => {
+  it('names the folder’s branch, or says no branch', () => {
+    expect(branchQuestionBase({ on_branch: 'main' }, 'main')).toBe('main');
+    expect(branchQuestionBase({ on_branch: null }, 'main')).toBe('no branch');
+    expect(branchQuestionBase({}, 'main')).toBe('main');
   });
 });
 

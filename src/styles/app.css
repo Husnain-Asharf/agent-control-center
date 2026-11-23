@@ -829,3 +829,4 @@ a:hover .node-ring, a:focus-visible .node-ring { stroke-width: 2.8; }
   :root[data-style="glass"] :is(.main, .decide-bar) { background: var(--panel); }
   :root[data-style="glass"] :is(.palette, .dialog, .inbox, .toast) { background: var(--raised); }
 }
+button.link { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }

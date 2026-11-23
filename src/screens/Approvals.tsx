@@ -3,6 +3,7 @@ import { Lamp } from '../components/Lamp';
 import {
   alwaysAllowState,
   approvalKey,
+  branchQuestionBase,
   decide,
   decisionFor,
   decisionKeyAllowed,
@@ -46,7 +47,7 @@ function Detail({ ap, now }: { ap: Approval; now: number }) {
   const project = useStore((s) => (session ? s.projects[session.project_id] : undefined));
   const [busy, setBusy] = useState(false);
   const projectName = project?.name ?? 'this project';
-  const base = project?.base_branch ?? 'the base branch';
+  const base = branchQuestionBase(ap, project?.base_branch ?? 'the base branch');
   const branchQuestion = isBranchQuestion(ap);
   const always = alwaysAllowState(ap);
   const json = useMemo(() => JSON.stringify(ap.input, null, 2) ?? 'null', [ap.input]);

@@ -1,4 +1,8 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { Dialog } from '../components/Dialog';
+import { request } from '../lib/ipc';
+import { errorText } from '../lib/errorText';
 import { TERM_FONT_SIZES, TEXT_SCALES, scaleLabel } from '../lib/appearance';
 import {
   COLOR_LABEL,
@@ -206,6 +210,66 @@ export function Settings() {
           </Row>
         </div>
       </section>
+      <Restart />
     </div>
+  );
+}
+
+function Restart() {
+  const sessions = useStore((s) => s.sessions);
+  const pushToast = useStore((s) => s.pushToast);
+  const [asking, setAsking] = useState(false);
+  const running = Object.values(sessions).filter((s) => ['starting', 'working', 'needs_you', 'idle'].includes(s.status)).length;
+  const fail = (e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' });
+  return (
+    <section className="block" aria-labelledby="restart-h">
+      <div className="block-head">
+        <h2 id="restart-h">Restart</h2>
+      </div>
+      <div className="list">
+        <Row title="Restart the window" note="Reloads the screens. Sessions keep running.">
+          <button className="btn" type="button" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </Row>
+        <Row title="Restart the app" note="Quits and opens the app again. Sessions keep running in the daemon.">
+          <button className="btn" type="button" onClick={() => invoke('restart_app').catch(fail)}>
+            Restart app
+          </button>
+        </Row>
+        <Row
+          title="Restart the daemon"
+          note="Stops every session and starts the daemon again. Use it after an update. Sessions come back with Restart."
+        >
+          <button className="btn btn--danger" type="button" onClick={() => setAsking(true)}>
+            Restart daemon
+          </button>
+        </Row>
+      </div>
+      {asking && (
+        <Dialog
+          title="Restart the daemon"
+          onClose={() => setAsking(false)}
+          onSubmit={() => {
+            setAsking(false);
+            request('daemon_restart').catch(fail);
+          }}
+        >
+          <p className="muted">
+            {running === 0
+              ? 'No session is running.'
+              : `${running} running ${running === 1 ? 'session stops' : 'sessions stop'}. Each comes back with Restart, in the same conversation.`}
+          </p>
+          <div className="dialog-actions">
+            <button type="button" className="btn btn--ghost" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn--danger">
+              Restart daemon
+            </button>
+          </div>
+        </Dialog>
+      )}
+    </section>
   );
 }

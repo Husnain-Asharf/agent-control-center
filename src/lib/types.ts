@@ -95,6 +95,8 @@ export interface Approval {
   kind?: 'permission' | 'branch';
   /** For a branch question: the branch Make branch would create. */
   branch?: string | null;
+  /** For a branch question: the branch the folder is on, null when it is on no branch. */
+  on_branch?: string | null;
 }
 
 export type Decision = 'allow_once' | 'allow_always' | 'deny' | 'make_branch' | 'stay_on_base';

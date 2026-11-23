@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { alwaysAllowState, decide, isBranchQuestion, useNow, wantsVerb } from '../lib/approvals';
+import { alwaysAllowState, branchQuestionBase, decide, isBranchQuestion, useNow, wantsVerb } from '../lib/approvals';
 import { fmtTimer } from '../lib/format';
 import type { Approval, Decision } from '../lib/types';
 
@@ -23,18 +23,19 @@ export function ApprovalDock({
   };
 
   if (isBranchQuestion(approval)) {
+    const on = branchQuestionBase(approval, baseBranch);
     return (
       <div className="dock" role="region" aria-label="Branch question">
         <span className="lamp lamp--needs" />
         <div className="dock-main">
           <div className="dock-title">
             <strong>
-              Wants to {wantsVerb(approval.tool)} on {baseBranch}
+              Wants to {wantsVerb(approval.tool)} on {on}
             </strong>{' '}
             <code>{approval.summary}</code>
           </div>
           <div className="dock-sub">
-            Waiting {fmtTimer(now - approval.created_at)} · Make a branch first, or allow it on {baseBranch}
+            Waiting {fmtTimer(now - approval.created_at)} · Make a branch first, or allow it on {on}
           </div>
         </div>
         <div className="dock-actions">
@@ -42,7 +43,7 @@ export function ApprovalDock({
             Make branch {approval.branch ?? ''}
           </button>
           <button className="btn" type="button" disabled={busy} onClick={() => act('stay_on_base')}>
-            Allow on {baseBranch}
+            Allow on {on}
           </button>
           <button className="btn btn--danger" type="button" disabled={busy} onClick={() => act('deny')}>
             Deny

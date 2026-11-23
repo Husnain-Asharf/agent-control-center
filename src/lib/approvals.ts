@@ -25,6 +25,12 @@ export function wantsVerb(tool: string): string {
   return `use ${tool}`;
 }
 
+/** What a branch question says the folder is on: its branch, `no branch` when detached, or the project's base branch from an older daemon. */
+export function branchQuestionBase(a: Pick<Approval, 'on_branch'>, base: string): string {
+  if (a.on_branch === undefined) return base;
+  return a.on_branch ?? 'no branch';
+}
+
 /** Whether the approval is a branch question rather than a tool permission. */
 export function isBranchQuestion(a: Pick<Approval, 'kind'>): boolean {
   return a.kind === 'branch';
