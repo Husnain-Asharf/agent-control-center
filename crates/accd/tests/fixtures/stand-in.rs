@@ -97,7 +97,11 @@ fn record(args: &[String]) {
     // several stand-ins in it.
     let tmp = format!("stand-in-run.json.{}.tmp", std::process::id());
     std::fs::write(&tmp, record.to_string()).expect("write the run record");
-    std::fs::rename(&tmp, "stand-in-run.json").expect("move the run record");
+    // On Windows a rename fails while another stand-in has the file open; the
+    // record is then the other one's, which tests in a shared folder do not read.
+    if std::fs::rename(&tmp, "stand-in-run.json").is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Prints `line 1` to `line <n>`. A `steady` stream pauses a moment every
