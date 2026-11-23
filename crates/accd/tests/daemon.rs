@@ -1696,7 +1696,8 @@ async fn a_claude_cmd_gets_the_task_as_typed() {
 
     let s = start_session(&mut app, &h.repo, "First line\nsecond \"line\"").await;
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
-    assert_eq!(run_record(&s.worktree)["args"][4], "First line second \"line\"");
+    let args = run_record(&s.worktree)["args"].as_array().unwrap().clone();
+    assert_eq!(args.last().unwrap(), "First line second \"line\"", "the task is the last argument");
 
     // A task longer than cmd runs is refused before anything is made for it.
     let worktrees = || std::fs::read_dir(h.repo.join(".worktrees")).unwrap().count();
