@@ -14,11 +14,11 @@ A free, open-source desktop app to run and supervise AI coding agents like Claud
 
 ## What it does
 
-Agent Control Center runs several Claude Code sessions in one window. Each session is a real coding agent in its own terminal and its own git worktree, owned by a small local daemon, so it keeps running when you close the window. Permission requests from all sessions land in one approvals inbox.
+Agent Control Center runs several Claude Code sessions in one window. Each session is a real coding agent in its own terminal, owned by a small local daemon, so it keeps running when you close the window. Permission requests from all sessions land in one approvals inbox.
 
 ## Features
 
-- Each session runs in its own git worktree and `agent/<slug>` branch, so your checkout is untouched.
+- Sessions work in the project folder, so sessions in one project build on each other's changes. Before the first change on the base branch, the app asks whether to make a branch. A session can also get its own git worktree and `agent/<slug>` branch.
 - Sessions keep running when the window closes. Reopen the app and reattach.
 - A live terminal for each session, in the real Claude Code UI.
 - One approvals inbox with Allow once, Always allow and Deny.

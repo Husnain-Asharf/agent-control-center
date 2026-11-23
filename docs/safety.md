@@ -12,16 +12,26 @@ Windows has no login shell. Sessions get the app's PATH, which an app started fr
 
 **Approvals.** A permission request from Claude Code is held by `acc-hook` until you decide. The request waits for your decision in the inbox. Claude Code runs some actions without asking, depending on its own permission mode (see Known limitations). If the daemon is unreachable the request is denied, and a pending approval expires after 55 minutes.
 
+**Sessions in the project folder.** A new session works in the project's own folder, on the branch the folder is on. No worktree and no branch are made when it starts.
+
+- The first time it wants to edit a file, or to run a git command that commits on the current branch (`commit`, `merge`, `cherry-pick`, `revert`, `pull`, `am` or `rebase`, anywhere in the command), while the folder is on the project's base branch or on no branch, the inbox asks first.
+- **Make branch** creates `agent/<slug>` at the current commit without a checkout: the files, the index and uncommitted changes stay as they are, and no repo hook runs. Every session in the folder goes on with the new branch, and their own branch questions are settled by it.
+- **Allow on `<base>`** lets this session change the base branch, and it is not asked again. **Deny** blocks the call.
+- The question comes in every Claude Code permission mode, auto and accept-edits included.
+- A request on a protected path (below) waits for an approval in every mode too, because Claude Code reads files in its own folder without asking, and the project folder holds the real `.env` and key files that a worktree never has.
+- These sessions start with `--setting-sources user,project`, so the checkout's untracked `.claude/settings.local.json` is not loaded. Its saved rules would run commands without asking, and the inbox would never see them. Its local hooks and plugin choices are not loaded either.
+- Choose **Separate folder and branch** in the New session form to give a session a worktree of its own instead (see [Data and privacy](#data-and-privacy)).
+
 **Always allow.** `Always allow in <project>` saves a rule for that project. The approval shows what the rule will cover before you choose it.
 
-- Bash: commands that start with the same first two words, such as `npm install`. For a runner the rule names what it runs: `npx vitest`, `uv run pytest`, `python3 -m pytest`. A rule covers a command only when it has no shell operators (`;`, `&`, `|`, `` ` ``, `$(`, `>`, `<`, newline), no expansions (`*`, `?`, `[`, `{`, `\`, `~`, `$`), no `..`, no URL, no absolute path outside the session's worktree (also when the path is attached to a flag, `-C/path`), and at most 256 words.
-- Edit, Write, MultiEdit, Read, NotebookEdit, Glob and Grep: files inside the session's worktree.
+- Bash: commands that start with the same first two words, such as `npm install`. For a runner the rule names what it runs: `npx vitest`, `uv run pytest`, `python3 -m pytest`. A rule covers a command only when it has no shell operators (`;`, `&`, `|`, `` ` ``, `$(`, `>`, `<`, newline), no expansions (`*`, `?`, `[`, `{`, `\`, `~`, `$`), no `..`, no URL, no absolute path outside the session's folder or in its `.worktrees` (also when the path is attached to a flag, `-C/path`), and at most 256 words.
+- Edit, Write, MultiEdit, Read, NotebookEdit, Glob and Grep: files inside the session's folder (its worktree, or the project folder), except other sessions' worktrees in `.worktrees`.
 - WebFetch: URLs with the same origin (scheme, host and port).
 
 **What Always allow never covers.** For these, Always allow allows the request once and saves nothing, and no saved rule ever allows them. Program names match in any case, because macOS file systems ignore case (`GIT` runs git).
 
 - a request on a protected path (below);
-- a command with shell operators or expansion characters, an absolute path outside the worktree, `..` or a URL, or one of more than 256 words or with more than 8 runners nested;
+- a command with shell operators or expansion characters, an absolute path outside the session's folder, a path in `.worktrees`, `..` or a URL, or one of more than 256 words or with more than 8 runners nested;
 - inline code: an interpreter with code on its command line. The interpreters are `python` (any python or pypy build, such as `python3.12` or `python3.13t`), `node`, `deno`, `bun`, `tsx`, `ts-node`, `ipython`, `bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `tcsh`, `csh`, `perl`, `ruby`, `php` and `osascript`. The flags are:
   - `-c`, `-e`, `-E`, `-p`, `-r`, `eval`, `--eval`, `--print` and `--command`;
   - `--require`, `--import`, `--loader` and `--preload`, which load code before the script;
@@ -51,11 +61,13 @@ Rules for runners name what they run: `npx vitest`, `uv run pytest`, `python3 -m
 **Protected paths**, matched in any case in the request's summary and in its path fields. On Windows a backslash separates folders too:
 
 - a file whose name starts with `.env`, such as `.env.local` or `.envrc`;
-- a file whose name ends with `.pem` or `.key`;
-- anything in or through `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker` or `.claude`, and the files `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc` and `.mcp.json`;
+- a file whose name ends with `.pem`, `.key`, `.jks`, `.p12`, `.pfx`, `.keystore` or `.p8`;
+- a JSON file whose name starts with `credentials` or `service-account`;
+- anything in or through `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.claude` or `.git` (its hooks and config run code later), and the files `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `.mcp.json` and `key.properties`;
+- anything in the folder the repo's `core.hooksPath` names, read when the session starts, such as husky's `.husky/_` and `.husky`;
 - anything in `.config/gh` or `.config/gcloud`.
 
-On Windows a name also matches without the dots and spaces at its end, which Windows drops (`.claude.` is `.claude`). A short (8.3) name, a `~` followed by a digit, counts as a protected path when it can stand for one of these names: its first two characters are those of a protected name's short form, as in `CLAUDE~1` and `CL3F2A~1` (`.claude`), `ENV~1`, `SSH~1`, `MCP~1.JSO` or `CONFIG~1`, or its extension is `JSO`, `PEM` or `KEY`, as in `SETTIN~1.JSO`. Other short names, such as the git revision `HEAD~1`, are not protected paths, but they still ask each time. Short names in the session's own worktree path do not count.
+On Windows a name also matches without the dots and spaces at its end, which Windows drops (`.claude.` is `.claude`). A short (8.3) name, a `~` followed by a digit, counts as a protected path when it can stand for one of these names: its first two characters are those of a protected name's short form, as in `CLAUDE~1` and `CL3F2A~1` (`.claude`), `ENV~1`, `SSH~1`, `MCP~1.JSO` or `CONFIG~1`, or its extension is that of a protected file, such as `JSO`, `PEM`, `KEY` or `JKS`, as in `SETTIN~1.JSO`. Other short names, such as the git revision `HEAD~1`, are not protected paths, but they still ask each time. Short names in the session's own worktree path do not count.
 
 **Editing rules by hand.** Rules cannot be edited in the app yet. They live in `acc.db` in the [data directory](#data-and-privacy), table `rules`, and `accd` reads them on every request, so a change applies at once. To list them with their project names (on Linux the file is `~/.local/share/AgentControlCenter/acc.db`, on Windows `%LOCALAPPDATA%\AgentControlCenter\acc.db`):
 
@@ -105,7 +117,7 @@ It holds:
 - `acc.db`: SQLite database with projects, sessions, approvals, rules and the event log.
 - `sessions/<session id>/claude-settings.json`: the hook settings passed to Claude Code.
 
-Worktrees are in the project repo, at `.worktrees/<slug>` on branch `agent/<slug>`. The daemon adds `.worktrees/` to `.git/info/exclude`.
+A session with a separate folder works in a worktree in the project repo, at `.worktrees/<slug>` on branch `agent/<slug>`. The daemon adds `.worktrees/` to `.git/info/exclude`. A session in the project folder makes no worktree, and Make branch creates `agent/<slug>` in the folder itself.
 
 To stop the daemon, and the sessions with it:
 
@@ -126,7 +138,10 @@ On Windows: `taskkill /IM accd.exe /F`.
 - Sessions die with the daemon. After a restart they show as Stopped, and `Restart` resumes the same Claude conversation (`--resume`).
 - On Windows, Stop ends the session's processes at once. On macOS and Linux they get a hangup signal and a second to exit first.
 - Approvals fail closed. If `acc-hook` cannot reach the daemon, the request is denied. A pending approval expires after 55 minutes.
-- Claude Code's auto and accept-edits permission modes do not ask. Claude runs what the mode accepts and the request never reaches the inbox. Keep sessions in the default mode (Shift+Tab in the session's terminal changes it).
+- Claude Code's auto and accept-edits permission modes do not ask. Claude runs what the mode accepts and the request never reaches the inbox. Keep sessions in the default mode (Shift+Tab in the session's terminal changes it). In the project folder, the branch question and protected paths still ask.
+- Sessions in the project folder edit your own checkout. If you edit the same files at the same time, the changes mix. Sessions in one folder also share git: one session's `git stash`, `git checkout -- .` or `git reset --hard` can drop the others' uncommitted work.
+- Two sessions writing one file at the same moment: Claude Code's Edit refuses a file that changed since it was read, but Write and shell commands do not check.
+- A shell command that changes files on the base branch without committing, such as `npm install` or `sed -i`, does not ask the branch question. It goes through the normal approvals.
 - The socket has no authentication. It is mode 0600 (on Windows only your user can open the pipe), so other users cannot connect, but any process of yours can, code the agent runs included, and it can do what the app does, such as approve its own requests. See [SECURITY.md](../SECURITY.md). Authentication is planned.
 - On Windows the hooks need Claude Code 2.1.139 or later, which starts a hook program directly, with no shell.
 - On Windows the session terminal is ConPTY, which draws the screen rather than passing every byte through. Output that scrolls by very fast can be missing from the scrollback.
@@ -137,7 +152,7 @@ On Windows: `taskkill /IM accd.exe /F`.
   - `GIT_*` variables already exported in the shell;
   - external `git-<name>` programs;
   - interpreters and code flags not on the list above, such as `fish -C`;
-  - code run from files in the worktree: git hooks through `core.hooksPath` or husky, `npm install` lifecycle scripts, `git clone --template`, and `npm run` or `make` targets.
+  - code run from files in the session's folder: `npm install` lifecycle scripts, `git clone --template`, and `npm run` or `make` targets. Edits in `.git` and in the `core.hooksPath` folder are protected, but a `core.hooksPath` set after the session started is not known until it restarts.
 - On Windows, Always allow never covers a shell command with an absolute path or a `:` in a word, such as `C:\x`, `/c/x`, `D:notes` or `host:3000`. It asks each time.
 - On Windows, Always allow never covers a short (8.3) name such as `CLAUDE~1`, a name that ends in a dot or a space, a device name such as `NUL` or `COM1`, a data stream such as `file::$DATA`, or a `\\?\` or `\\.\` prefix. Windows can read these as another file, so they ask each time.
 - On Windows, a git revision such as `HEAD~1` looks like a short name, so a command with one asks each time. It shows as a protected path only when its first two characters match a protected name's short form, as in `cleanup~1` (`.claude`) or `docs~1` (`.docker`).
@@ -145,6 +160,6 @@ On Windows: `taskkill /IM accd.exe /F`.
 - On Windows the `-setup.exe` ends the daemon before it upgrades or uninstalls the app, and running sessions end with it. The `.msi` does not: end the daemon first (`taskkill /IM accd.exe /F`), as you must before uninstalling 0.3.0, because Windows cannot replace or remove the files of a running program.
 - If you set `ACC_DATA_DIR` on Windows, point it at a folder only you can open. The default, under `%LOCALAPPDATA%`, is private.
 - On Windows, a task for a `claude.cmd` (npm) can be about 7,000 characters at most, because that is what cmd.exe can run. The native `claude.exe` takes longer ones.
-- Worktrees and their `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
+- Worktrees and `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
 - A worktree starts from the repo's `HEAD`, so uncommitted changes in your checkout are not in it.
 - Local only: one machine, no remote hosts. Windows builds are x64 only, and Linux builds x86_64 only.

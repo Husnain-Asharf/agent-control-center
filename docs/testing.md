@@ -49,7 +49,7 @@ The real run needs Claude Code installed and signed in. It makes Claude run a fe
 
 ### What the checklist covers
 
-1. A new session starts in `.worktrees/<slug>` on branch `agent/<slug>`.
+1. A session with a separate folder starts in `.worktrees/<slug>` on branch `agent/<slug>`.
 2. Typed input reaches Claude.
 3. A permission request reaches Approvals, and Allow once runs it.
 4. Always allow auto-allows the next identical request, and the event log shows the policy as the actor.
@@ -58,5 +58,7 @@ The real run needs Claude Code installed and signed in. It makes Claude run a fe
 7. After a daemon restart the session shows as Stopped, and Restart resumes the same conversation.
 8. A pending approval survives the app disconnecting, and pressing Esc in Claude cancels it.
 9. The `PermissionRequest` payload has `tool_name` and `tool_input`, and the approval summary is the command.
+10. A session in the project folder makes no worktree and no branch.
+11. Its first edit on the base branch asks the branch question, and Make branch creates the branch and keeps uncommitted changes. The edit is simulated over a hook connection in both runs.
 
 When you change sessions, approvals or the hook, run the real smoke test and note the result in your pull request.
