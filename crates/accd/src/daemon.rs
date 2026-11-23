@@ -628,11 +628,11 @@ pub(crate) enum Answer {
 pub(crate) enum PreToolOutcome {
     /// Nothing to add: Claude Code goes on as it would.
     Proceed,
-    /// Claude Code must ask, so the request reaches the inbox: a request on
-    /// a protected path from a session in the project folder.
-    Ask,
-    /// The branch question is pending. `protected` makes a yes an ask rather
-    /// than an allow, so the protected path still asks on its own.
+    /// A request on a protected path from a session in the project folder:
+    /// it waits for an approval in the inbox before it runs.
+    Protected,
+    /// The branch question is pending. With `protected`, a yes still waits
+    /// for the protected path's own approval.
     Branch { id: String, answer: oneshot::Receiver<Answer>, protected: bool },
 }
 
@@ -1005,7 +1005,7 @@ impl Daemon {
     /// A call that changes files while the folder is on the base branch (or
     /// on no branch) asks the branch question, unless the session already
     /// chose to stay on the base branch. Any other call on a protected path
-    /// makes Claude Code ask, because Claude Code reads files in its own
+    /// waits for an approval, because Claude Code reads files in its own
     /// folder without asking, and the project folder holds the real secrets
     /// that a worktree never had. Worktree sessions are not checked here.
     pub(crate) fn pre_tool_check(&mut self, session_id: &str, tool: &str, summary: &str, input: &Value) -> PreToolOutcome {
@@ -1025,7 +1025,7 @@ impl Daemon {
             return self.ask_branch(session_id, tool, summary, input, protected);
         }
         if protected {
-            return PreToolOutcome::Ask;
+            return PreToolOutcome::Protected;
         }
         PreToolOutcome::Proceed
     }

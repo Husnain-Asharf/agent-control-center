@@ -26,7 +26,6 @@ const WAIT: Duration = Duration::from_secs(10);
 const CLAUDE_NOT_FOUND: &str = "Claude Code was not found. Install it or add it to your PATH.";
 const EXPIRED: &str = "No decision in Agent Control Center within 55 minutes.";
 const DENIED: &str = "Denied in Agent Control Center.";
-const PROTECTED_ASK: &str = "This touches a protected path, so Agent Control Center asks each time.";
 /// The once-only reason for a runner with a flag or nothing to run.
 const RUNNER: &str = "runner with a flag or nothing to run, so a rule would cover anything it runs";
 
@@ -1958,9 +1957,26 @@ async fn protected_paths_ask_in_the_project_folder_only() {
     let env = repo_root(&h.repo).join(".env").to_string_lossy().into_owned();
 
     let mut hk = hook(&h.socket(), &project.id, pre_tool("Read", json!({"file_path": env}))).await;
-    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("ask", Some(PROTECTED_ASK))));
+    let a = app.approval_created().await;
+    assert_eq!((a.kind, a.protected, a.rule_preview.as_deref()), (ApprovalKind::Permission, true, None));
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::AllowOnce }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("allow", None)));
+
     let mut hk = hook(&h.socket(), &project.id, pre_tool("Bash", json!({"command": "cat android/key.properties"}))).await;
-    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("ask", Some(PROTECTED_ASK))));
+    let a = app.approval_created().await;
+    assert!(a.protected);
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::Deny }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("deny", Some(DENIED))));
+
+    // A protected edit on the base branch asks the branch question, then the path's own approval.
+    let mut hk = hook(&h.socket(), &project.id, pre_tool("Edit", json!({"file_path": env}))).await;
+    let q = app.approval_created().await;
+    assert_eq!((q.kind, q.protected), (ApprovalKind::Branch, true));
+    app.call(Request::ApprovalDecide { approval_id: q.id, decision: Decision::StayOnBase }).await;
+    let a = app.approval_created().await;
+    assert_eq!((a.kind, a.protected), (ApprovalKind::Permission, true));
+    app.call(Request::ApprovalDecide { approval_id: a.id, decision: Decision::AllowOnce }).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout, Some(pre_tool_reply("allow", None)));
 
     let mut hk = hook(&h.socket(), &worktree.id, pre_tool("Read", json!({"file_path": env}))).await;
     assert_eq!(hook_reply(&mut hk).await, SILENT);

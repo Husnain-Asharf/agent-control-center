@@ -26,7 +26,6 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub const APPROVAL_EXPIRED: &str = "No decision in Agent Control Center within 55 minutes.";
 pub const APPROVAL_DENIED: &str = "Denied in Agent Control Center.";
-pub const PROTECTED_ASK: &str = "This touches a protected path, so Agent Control Center asks each time.";
 
 /// Events an app client may fall behind by before it is closed.
 const EVENT_CAPACITY: usize = 4096;
@@ -344,17 +343,20 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
             };
             let (approval_id, answer, protected) = match outcome {
                 PreToolOutcome::Proceed => return Some(silent),
-                PreToolOutcome::Ask => return Some(pre_tool("ask", Some(PROTECTED_ASK))),
+                PreToolOutcome::Protected => return protected_approval(shared, session_id, tool, summary, input, conn).await,
                 PreToolOutcome::Branch { id, answer, protected } => (id, answer, protected),
             };
-            return match wait_for_answer(shared, &approval_id, answer, conn).await? {
-                Waited::Answered(Answer::Decided(Decision::Deny)) => Some(pre_tool("deny", Some(APPROVAL_DENIED))),
-                // A yes on a protected path still asks for the path itself.
-                Waited::Answered(Answer::Decided(_)) if protected => Some(pre_tool("ask", Some(PROTECTED_ASK))),
-                Waited::Answered(Answer::Decided(_)) => Some(pre_tool("allow", None)),
-                Waited::Answered(Answer::Proceed) => Some(silent),
-                Waited::Expired => Some(pre_tool("deny", Some(APPROVAL_EXPIRED))),
+            let yes = match wait_for_answer(shared, &approval_id, answer, conn).await? {
+                Waited::Answered(Answer::Decided(Decision::Deny)) => return Some(pre_tool("deny", Some(APPROVAL_DENIED))),
+                Waited::Expired => return Some(pre_tool("deny", Some(APPROVAL_EXPIRED))),
+                Waited::Answered(Answer::Decided(_)) => true,
+                Waited::Answered(Answer::Proceed) => false,
             };
+            // A protected path still waits for its own approval.
+            if protected {
+                return protected_approval(shared, session_id, tool, summary, input, conn).await;
+            }
+            return Some(if yes { pre_tool("allow", None) } else { silent });
         }
         HookEffect::Nothing => return Some(silent),
     };
@@ -373,6 +375,32 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
 
 fn pre_tool(decision: &str, reason: Option<&str>) -> HookReply {
     HookReply { stdout: Some(pre_tool_reply(decision, reason)), exit_code: 0 }
+}
+
+/// Holds a tool call on a protected path, from a session in the project
+/// folder, for an approval in the inbox, and answers the PreToolUse hook
+/// with the decision. Claude Code's own "ask" answer cannot be used: it
+/// fails the call instead of asking (Claude Code 2.1.323). An allow here
+/// skips Claude Code's permission prompt, so the call is asked once.
+async fn protected_approval(
+    shared: &Shared,
+    session_id: &str,
+    tool: String,
+    summary: String,
+    input: Value,
+    conn: &mut Reader,
+) -> Option<HookReply> {
+    let outcome = shared.state.lock().await.request_approval(session_id, tool, summary, input);
+    let (approval_id, decision) = match outcome {
+        ApprovalOutcome::Ignored => return Some(HookReply { stdout: None, exit_code: 0 }),
+        ApprovalOutcome::Allowed => return Some(pre_tool("allow", None)),
+        ApprovalOutcome::Pending { id, decision } => (id, decision),
+    };
+    Some(match wait_for_answer(shared, &approval_id, decision, conn).await? {
+        Waited::Answered(Answer::Decided(Decision::Deny)) => pre_tool("deny", Some(APPROVAL_DENIED)),
+        Waited::Answered(_) => pre_tool("allow", None),
+        Waited::Expired => pre_tool("deny", Some(APPROVAL_EXPIRED)),
+    })
 }
 
 /// Resolves once the peer closed its end. A hook sends nothing after its request.
