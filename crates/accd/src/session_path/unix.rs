@@ -11,6 +11,10 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// How long the interactive login shell gets to print its PATH. It also
+/// reads `~/.zshrc` or `~/.bashrc`, and nvm set up there can take a second
+/// or two.
+pub const INTERACTIVE_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the login shell gets to print its PATH.
 pub const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 /// The most of the login shell's output that is read.
@@ -39,14 +43,27 @@ fn shell_or_default(shell: Option<OsString>, is_executable: impl Fn(&Path) -> bo
     PathBuf::from(found.unwrap_or(last))
 }
 
-/// The PATH of `shell` as a login shell, or `None` when it cannot be read or
-/// holds no absolute folder (nushell prints `"$PATH"` as it is). The reason
-/// then goes to stderr, which is `accd.log`. Blocks for up to
+/// The PATH of `shell`, or `None` when it cannot be read or holds no
+/// absolute folder (nushell prints `"$PATH"` as it is). The shell is asked
+/// as an interactive login shell first, which also reads `~/.zshrc`, where
+/// nvm and the like are often set up. When that gives no PATH, it is asked
+/// as a login shell only. Each reason goes to stderr, which is `accd.log`.
+/// Blocks for up to [`INTERACTIVE_SHELL_TIMEOUT`] plus
 /// [`LOGIN_SHELL_TIMEOUT`].
 pub fn login_path(shell: &Path) -> Option<String> {
-    let reason = match ask_login_shell(shell, LOGIN_SHELL_TIMEOUT) {
-        Ok(path) if path.split(':').any(is_absolute_dir) => return Some(path),
-        Ok(path) => format!("it printed {path:?}, which holds no absolute folder"),
+    login_path_within(shell, INTERACTIVE_SHELL_TIMEOUT, LOGIN_SHELL_TIMEOUT)
+}
+
+/// [`login_path`] with the time each of the two tries gets.
+fn login_path_within(shell: &Path, interactive_timeout: Duration, login_timeout: Duration) -> Option<String> {
+    let reason = match with_absolute_dir(ask_interactive_shell(shell, interactive_timeout)) {
+        Ok(path) => return Some(path),
+        Err(reason) => reason,
+    };
+    let next = "Asking it as a login shell only.";
+    eprintln!("accd: could not read the PATH of the interactive login shell {}: {reason}. {next}", shell.display());
+    let reason = match with_absolute_dir(ask_login_shell(shell, login_timeout)) {
+        Ok(path) => return Some(path),
         Err(reason) => reason,
     };
     let fallback = "Sessions get the daemon's PATH with Homebrew's folders, ~/.local/bin and the folder of claude added.";
@@ -54,30 +71,60 @@ pub fn login_path(shell: &Path) -> Option<String> {
     None
 }
 
+/// The PATH a shell printed, unless it holds no absolute folder.
+fn with_absolute_dir(printed: Result<String, String>) -> Result<String, String> {
+    match printed {
+        Ok(path) if !path.split(':').any(is_absolute_dir) => Err(format!("it printed {path:?}, which holds no absolute folder")),
+        printed => printed,
+    }
+}
+
 /// Whether a PATH entry is an absolute folder.
 fn is_absolute_dir(entry: &str) -> bool {
     entry.starts_with('/')
 }
 
-/// Runs `shell -l -c` with a command that prints the PATH between two marker
-/// lines made unique for this call, in a process group of its own, and
-/// returns the PATH between them. A banner from the startup files, output
-/// after the PATH (`.zlogout`), or a job that holds the output open cannot
-/// hide it. Once the PATH is in, or after `timeout`, the shell is killed
-/// with its whole group. The error says why there is no PATH.
+/// [`ask_shell`] with `-l -i`: as an interactive login shell, which also
+/// reads `~/.zshrc`, and `~/.bashrc` where `~/.bash_profile` or `~/.profile`
+/// reads it.
+pub fn ask_interactive_shell(shell: &Path, timeout: Duration) -> Result<String, String> {
+    ask_shell(shell, &["-l", "-i"], timeout)
+}
+
+/// [`ask_shell`] with `-l`: as a login shell only, which reads the login
+/// files such as `~/.zprofile` and `~/.profile`.
 pub fn ask_login_shell(shell: &Path, timeout: Duration) -> Result<String, String> {
+    ask_shell(shell, &["-l"], timeout)
+}
+
+/// Runs `shell` with `flags`, then `-c` and a command that prints the PATH
+/// between two marker lines made unique for this call, and returns the PATH
+/// between them. A banner, a prompt or escape codes from the startup files,
+/// output after the PATH (`.zlogout`), or a job that holds the output open
+/// cannot hide it. The shell gets a null stdin, so a startup script that
+/// asks a question does not wait for an answer. It runs in a session of its
+/// own, with no terminal: an interactive shell would stop when it tried to
+/// take over the terminal of a daemon started from one, and without a
+/// terminal it does no job control, so the programs it starts stay in its
+/// process group. Once the PATH is in, or after `timeout`, the shell is
+/// killed with that whole group. The error says why there is no PATH.
+fn ask_shell(shell: &Path, flags: &[&str], timeout: Duration) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
     let id = Uuid::new_v4().simple().to_string();
     let (begin, end) = (format!("ACC-PATH-BEGIN-{id}"), format!("ACC-PATH-END-{id}"));
     let print_path = format!("printf '\\n%s\\n%s\\n%s\\n' '{begin}' \"$PATH\" '{end}'");
-    let mut child = Command::new(shell)
-        .args(["-l", "-c", &print_path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("it could not start ({e})"))?;
+    let mut command = Command::new(shell);
+    command.args(flags).arg("-c").arg(&print_path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|e| format!("it could not start ({e})"))?;
     let Some(mut stdout) = child.stdout.take() else {
         kill_group(&mut child);
         return Err("it has no output".into());
@@ -187,15 +234,20 @@ mod tests {
         Some(Path::new("/Users/x"))
     }
 
-    /// A stand-in for a login shell. It gets `-l -c <command>`, so the command
-    /// is `$3`. It has run once already: macOS checks a new executable the
-    /// first time it runs, which can take longer than a test's timeout when
-    /// many tests start new scripts at once. And Linux does not start a file
-    /// that is open for writing (ETXTBSY): a process another test forks while
-    /// the script is written keeps it open until that process execs.
+    /// A stand-in for a login shell. It gets `-l -i -c <command>` or
+    /// `-l -c <command>`, and exits with 64 on anything else. The body finds
+    /// the command in `$cmd`, and `interactive` or `login` in `$mode`. It has
+    /// run once already: macOS checks a new executable the first time it
+    /// runs, which can take longer than a test's timeout when many tests
+    /// start new scripts at once. And Linux does not start a file that is
+    /// open for writing (ETXTBSY): a process another test forks while the
+    /// script is written keeps it open until that process execs.
     fn fake_shell(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{body}\n")).unwrap();
+        let args = "if [ $# = 4 ] && [ \"$1 $2 $3\" = '-l -i -c' ]; then mode=interactive cmd=$4\n\
+                    elif [ $# = 3 ] && [ \"$1 $2\" = '-l -c' ]; then mode=login cmd=$3\n\
+                    else exit 64; fi";
+        std::fs::write(&path, format!("#!/bin/sh\n[ -n \"$WARM_UP\" ] && exit 0\n{args}\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -220,7 +272,7 @@ mod tests {
 
     #[test]
     fn the_login_path_comes_first_then_inherited_folders_it_lacks_then_claude() {
-        // nvm set up in ~/.zshrc: a login shell (`-l`) does not read it, but an
+        // nvm from ~/.zshrc when only the login shell (`-l`) could be read: an
         // app started from a terminal inherits it, and the agent must find node.
         let login = "/opt/homebrew/bin:/usr/bin:/bin";
         let inherited = "/Users/x/.nvm/versions/node/v23/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin";
@@ -252,7 +304,7 @@ mod tests {
     fn a_login_shell_that_prints_no_absolute_folder_gives_no_login_path() {
         let dir = tempfile::tempdir().unwrap();
         // Like nushell, where `"$PATH"` is a plain string.
-        let shell = fake_shell(dir.path(), "nu-like", "PATH='$PATH'\nexport PATH\nexec /bin/sh -c \"$3\"");
+        let shell = fake_shell(dir.path(), "nu-like", "PATH='$PATH'\nexport PATH\nexec /bin/sh -c \"$cmd\"");
         assert_eq!(ask_login_shell(&shell, LOGIN_SHELL_TIMEOUT), Ok("$PATH".into()));
         assert_eq!(login_path(&shell), None);
     }
@@ -321,7 +373,7 @@ mod tests {
     fn asks_the_shell_for_its_path() {
         let dir = tempfile::tempdir().unwrap();
         // Like a login shell whose profile prints a banner and sets the PATH.
-        let body = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$3\"";
+        let body = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$cmd\"";
         let shell = fake_shell(dir.path(), "login-shell", body);
         assert_eq!(ask_login_shell(&shell, LOGIN_SHELL_TIMEOUT), Ok("/login/bin:/usr/bin:/bin".into()));
         assert_eq!(login_path(&shell), Some("/login/bin:/usr/bin:/bin".into()));
@@ -333,7 +385,7 @@ mod tests {
         let job = dir.path().join("job");
         // A profile that leaves a job holding the output open, and a `.zlogout` that prints.
         let body = format!(
-            "sleep 30 &\necho $! > '{}'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\n/bin/sh -c \"$3\"\n{}",
+            "sleep 30 &\necho $! > '{}'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\n/bin/sh -c \"$cmd\"\n{}",
             job.display(),
             "echo 'Saving session...completed.'\nwait"
         );
@@ -351,7 +403,7 @@ mod tests {
         for (i, (body, reason)) in [
             ("exit 1", "without printing its PATH (exit status: 1)"),
             ("printf 'not a path'", "without printing its PATH (exit status: 0)"),
-            ("PATH=''\nexport PATH\nexec /bin/sh -c \"$3\"", "it printed an empty PATH"),
+            ("PATH=''\nexport PATH\nexec /bin/sh -c \"$cmd\"", "it printed an empty PATH"),
         ]
         .into_iter()
         .enumerate()
@@ -380,5 +432,87 @@ mod tests {
         for pid in std::fs::read_to_string(&pids).unwrap().lines() {
             gone(pid.parse().unwrap());
         }
+    }
+
+    #[test]
+    fn the_interactive_login_shell_is_asked_first_and_its_path_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        // Like zsh with nvm set up in ~/.zshrc, which only an interactive shell reads.
+        let body = format!(
+            "echo \"$mode\" >> '{}'\nPATH='/login/bin:/usr/bin:/bin'\n[ \"$mode\" = interactive ] && PATH=\"/rc/nvm/bin:$PATH\"\nexport PATH\nexec /bin/sh -c \"$cmd\"",
+            runs.display()
+        );
+        let shell = fake_shell(dir.path(), "rc-shell", &body);
+        assert_eq!(ask_interactive_shell(&shell, INTERACTIVE_SHELL_TIMEOUT), Ok("/rc/nvm/bin:/login/bin:/usr/bin:/bin".into()));
+        assert_eq!(ask_login_shell(&shell, LOGIN_SHELL_TIMEOUT), Ok("/login/bin:/usr/bin:/bin".into()));
+        std::fs::remove_file(&runs).unwrap();
+        // With a PATH from the interactive login shell, the login shell is not asked.
+        assert_eq!(login_path(&shell), Some("/rc/nvm/bin:/login/bin:/usr/bin:/bin".into()));
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "interactive\n");
+    }
+
+    #[test]
+    fn the_path_is_read_through_the_noise_of_an_interactive_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        // A ~/.zshrc with a colored banner, a window title, bracketed paste and
+        // a prompt with no newline, and more of them after the PATH.
+        let noise = "printf '\\033[1;32mWelcome back\\033[0m\\n\\033]0;~\\007\\033[?2004h%% '";
+        let body = format!(
+            "{noise}\nPATH='/rc/bin:/usr/bin:/bin'\nexport PATH\n/bin/sh -c \"$cmd\"\n{noise}\nprintf '\\033[?2004l\\r\\033[K\\r\\n'"
+        );
+        let shell = fake_shell(dir.path(), "noisy-shell", &body);
+        assert_eq!(ask_interactive_shell(&shell, INTERACTIVE_SHELL_TIMEOUT), Ok("/rc/bin:/usr/bin:/bin".into()));
+        assert_eq!(login_path(&shell), Some("/rc/bin:/usr/bin:/bin".into()));
+    }
+
+    #[test]
+    fn without_a_path_from_the_interactive_shell_the_login_shell_is_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (rc, runs, pids) = (dir.path().join("rc"), dir.path().join("runs"), dir.path().join("pids"));
+        // The interactive shell also runs `rc`, as zsh runs ~/.zshrc.
+        let body = format!(
+            "echo \"$mode\" >> '{}'\nPATH='/login/bin:/usr/bin:/bin'\n[ \"$mode\" = interactive ] && . '{}'\nexport PATH\nexec /bin/sh -c \"$cmd\"",
+            runs.display(),
+            rc.display()
+        );
+        let shell = fake_shell(dir.path(), "rc-shell", &body);
+        let hang = format!("sleep 30 &\necho $! > '{0}'\necho $$ >> '{0}'\nwait", pids.display());
+        for script in [
+            // It fails, or exits before the command runs.
+            "exit 1",
+            "exit 0",
+            // An empty PATH, or one with no absolute folder.
+            "PATH=''",
+            "PATH='$PATH'",
+            // It starts a job holding the output open, then hangs.
+            hang.as_str(),
+        ] {
+            std::fs::write(&rc, script).unwrap();
+            let _ = std::fs::remove_file(&runs);
+            let asked = Instant::now();
+            let path = login_path_within(&shell, Duration::from_millis(500), LOGIN_SHELL_TIMEOUT);
+            assert_eq!(path, Some("/login/bin:/usr/bin:/bin".into()), "{script}");
+            assert!(asked.elapsed() < Duration::from_secs(3), "{script}: took {:?}", asked.elapsed());
+            assert_eq!(std::fs::read_to_string(&runs).unwrap(), "interactive\nlogin\n", "{script}");
+        }
+        // The shell that hung was stopped with the job it started.
+        for pid in std::fs::read_to_string(&pids).unwrap().lines() {
+            gone(pid.parse().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_startup_script_that_asks_a_question_does_not_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        // Like an update prompt in ~/.zshrc that asks without checking for a
+        // terminal, on stdin and on the terminal. Stdin is null and the shell
+        // has no terminal, also when the tests run in one, so both reads end
+        // at once.
+        let body = "printf 'Update now? [Y/n] '\nread answer\nread answer < /dev/tty\nPATH='/rc/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$cmd\"";
+        let shell = fake_shell(dir.path(), "asking-shell", body);
+        let asked = Instant::now();
+        assert_eq!(ask_interactive_shell(&shell, Duration::from_secs(10)), Ok("/rc/bin:/usr/bin:/bin".into()));
+        assert!(asked.elapsed() < Duration::from_secs(5), "took {:?}", asked.elapsed());
     }
 }

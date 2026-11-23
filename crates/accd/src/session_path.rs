@@ -13,7 +13,7 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{ask_login_shell, login_path, login_shell, session_path, LOGIN_SHELL_TIMEOUT};
+pub use unix::{ask_interactive_shell, ask_login_shell, login_path, login_shell, session_path, INTERACTIVE_SHELL_TIMEOUT, LOGIN_SHELL_TIMEOUT};
 
 /// The PATH for agent sessions on Windows: the inherited PATH, then
 /// `claude_dir`, the folder of the `claude` that was found, unless it is in

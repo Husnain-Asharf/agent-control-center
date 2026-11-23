@@ -1541,15 +1541,16 @@ async fn sessions_get_the_login_shell_path() {
     let h = Harness::new();
     let mut cfg = h.config(stand_in(h.tmp.path(), "path-claude"));
     // Like a login shell whose profile prints a banner and sets the PATH. It
-    // gets `-l -c <command>`, so the command is `$3`.
-    let shell = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$3\"";
+    // is asked as an interactive login shell first, with `-l -i -c <command>`,
+    // so the command is `$4`.
+    let shell = "echo 'Last login: today'\nPATH='/login/bin:/usr/bin:/bin'\nexport PATH\nexec /bin/sh -c \"$4\"";
     cfg.login_shell = Some(script(h.tmp.path(), "login-shell", shell));
     let server = start(cfg).await;
     let mut app = Client::app(&h.socket()).await;
     let s = start_session(&mut app, &h.repo, "Show the PATH").await;
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     // The login PATH first, then what an app started from a terminal
-    // inherits (nvm set up in ~/.zshrc), then the folder of claude.
+    // inherits, then the folder of claude.
     let expected = merged_path(&["/login/bin", "/usr/bin", "/bin"], h.tmp.path());
     assert_eq!(run_path(&s.worktree), expected);
 
