@@ -12,6 +12,7 @@ import type {
   Approval,
   DaemonEvent,
   EventRecord,
+  PlanUsage,
   Project,
   Session,
   Snapshot,
@@ -36,6 +37,8 @@ export interface State {
   sessions: Record<string, Session>;
   /** Pending approvals only. Resolved ones leave the store. */
   approvals: Record<string, Approval>;
+  /** The Claude plan's limits, as the last status line reported them. */
+  planUsage: PlanUsage | null;
   /** Newest first, at most MAX_EVENTS. */
   events: EventRecord[];
   toasts: Toast[];
@@ -112,6 +115,7 @@ export const useStore = create<State>()((set) => ({
   projects: {},
   sessions: {},
   approvals: {},
+  planUsage: null,
   events: [],
   toasts: [],
   theme: initialTheme,
@@ -125,6 +129,7 @@ export const useStore = create<State>()((set) => ({
       projects: byId(s.projects),
       sessions: byId(s.sessions),
       approvals: byId(s.approvals.filter((a) => a.state === 'pending')),
+      planUsage: s.plan_usage ?? null,
     }),
 
   applyEvent: (e) =>
@@ -142,6 +147,8 @@ export const useStore = create<State>()((set) => ({
           const { [e.data.id]: _gone, ...rest } = st.approvals;
           return { approvals: rest };
         }
+        case 'plan_usage_updated':
+          return { planUsage: e.data };
         case 'event_appended':
           if (st.events.some((x) => x.seq === e.data.seq)) return st;
           return { events: [e.data, ...st.events].slice(0, MAX_EVENTS) };

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { usageLine } from '../lib/usage';
 import { Icon } from '../components/Icon';
 import { Lamp, STATUS_LABEL } from '../components/Lamp';
 import { openNewSession } from '../dialogs/NewSessionDialog';
@@ -34,6 +35,7 @@ export function Sessions() {
                 <strong>{s.title}</strong>
                 <span>
                   {projects[s.project_id]?.name ?? 'Unknown project'} · {s.branch}
+                  {usageLine(s) && <> · {usageLine(s)}</>}
                 </span>
               </span>
               <span className="proj-state">{STATUS_LABEL[s.status]}</span>

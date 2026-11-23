@@ -39,12 +39,40 @@ export interface Session {
   mode?: SessionMode;
   /** The user let this session change files on the base branch, so it is not asked again. */
   stay_on_base?: boolean;
+  /** What Claude Code last reported to its status line. Missing until then. */
+  usage?: SessionUsage | null;
   status: SessionStatus;
   status_since: number;
   started_at: number;
   ended_at: number | null;
   exit_code: number | null;
   history: StatusChange[];
+}
+
+export interface SessionUsage {
+  /** What the use would cost on the API, in US dollars. An estimate on a Claude plan. */
+  cost_usd: number;
+  /** 0 to 100. */
+  context_used_percentage: number | null;
+  context_window_size: number | null;
+  lines_added: number;
+  lines_removed: number;
+  model: string | null;
+  effort: string | null;
+  updated_at: number;
+}
+
+export interface PlanLimit {
+  /** 0 to 100. */
+  used_percentage: number;
+  /** Seconds since 1970. */
+  resets_at: number | null;
+}
+
+export interface PlanUsage {
+  five_hour: PlanLimit | null;
+  seven_day: PlanLimit | null;
+  updated_at: number;
 }
 
 export type ApprovalState = 'pending' | 'allowed' | 'denied' | 'cancelled' | 'expired';
@@ -85,6 +113,8 @@ export interface Snapshot {
   projects: Project[];
   sessions: Session[];
   approvals: Approval[];
+  /** Missing until a session has reported the plan's limits. */
+  plan_usage?: PlanUsage | null;
 }
 
 export type DaemonEvent =
@@ -93,7 +123,8 @@ export type DaemonEvent =
   | { kind: 'approval_created'; data: Approval }
   | { kind: 'approval_resolved'; data: Approval }
   | { kind: 'project_added'; data: Project }
-  | { kind: 'event_appended'; data: EventRecord };
+  | { kind: 'event_appended'; data: EventRecord }
+  | { kind: 'plan_usage_updated'; data: PlanUsage };
 
 export interface DaemonStatusPayload {
   connected: boolean;

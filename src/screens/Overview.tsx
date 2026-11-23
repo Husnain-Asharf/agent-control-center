@@ -4,20 +4,23 @@ import { Icon } from '../components/Icon';
 import { Lamp } from '../components/Lamp';
 import { openNewSession } from '../dialogs/NewSessionDialog';
 import { fmtDur } from '../lib/format';
-import { decide, isProtectedApproval, wantsVerb } from '../lib/approvals';
+import { decide, isBranchQuestion, isProtectedApproval, wantsVerb } from '../lib/approvals';
+import { fmtCost, level, resetText, usageByProject } from '../lib/usage';
+import type { PlanLimit } from '../lib/types';
 import { segmentsFor } from '../lib/segments';
 import { useStore } from '../store/store';
 
 const HOUR = 3_600_000;
 
 type Item =
-  | { kind: 'approval'; id: string; at: number; sessionId: string; tool: string; summary: string; protected: boolean }
+  | { kind: 'approval'; id: string; at: number; sessionId: string; tool: string; summary: string; protected: boolean; branch: boolean }
   | { kind: 'failed'; id: string; at: number; sessionId: string };
 
 export function Overview() {
   const projects = useStore((s) => s.projects);
   const sessions = useStore((s) => s.sessions);
   const approvals = useStore((s) => s.approvals);
+  const planUsage = useStore((s) => s.planUsage);
   const [range, setRange] = useState<Range>(60);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const now = useNow();
@@ -27,7 +30,7 @@ export function Overview() {
     const out: Item[] = [
       ...Object.values(approvals)
         .filter((a) => a.state === 'pending')
-        .map((a): Item => ({ kind: 'approval', id: a.id, at: a.created_at, sessionId: a.session_id, tool: a.tool, summary: a.summary, protected: isProtectedApproval(a) })),
+        .map((a): Item => ({ kind: 'approval', id: a.id, at: a.created_at, sessionId: a.session_id, tool: a.tool, summary: a.summary, protected: isProtectedApproval(a), branch: isBranchQuestion(a) })),
       ...Object.values(sessions)
         .filter((s) => s.status === 'failed')
         .map((s): Item => ({ kind: 'failed', id: s.id, at: s.status_since, sessionId: s.id })),
@@ -35,6 +38,7 @@ export function Overview() {
     return out.sort((a, b) => a.at - b.at);
   }, [approvals, sessions]);
 
+  const usageRows = useMemo(() => usageByProject(Object.values(sessions)), [sessions]);
   const projectCount = new Set(list.map((s) => s.project_id)).size;
   const waited = list.reduce(
     (sum, s) =>
@@ -114,10 +118,11 @@ export function Overview() {
                   </a>
                   <div className="what">
                     Asked to {wantsVerb(it.tool)} <code>{it.summary}</code>
+                    {it.branch && <> on {projects[sessions[it.sessionId]?.project_id ?? '']?.base_branch ?? 'the base branch'}</>}
                   </div>
                   <div className="wait">{fmtDur(now - it.at)}</div>
                   <div className="row-actions">
-                    {protectedItem ? (
+                    {protectedItem || it.branch ? (
                       <a className="btn" href={`#approvals/${it.id}`}>
                         Open
                       </a>
@@ -138,6 +143,36 @@ export function Overview() {
           )}
         </div>
       </section>
+      <section className="block" aria-labelledby="usage-h">
+        <div className="block-head">
+          <h2 id="usage-h">Usage</h2>
+          <p>Costs are what the same use would cost on the API. On a Claude plan, the limits below are what count.</p>
+        </div>
+        <div className="usage-grid">
+          <div className="list usage-plan">
+            <LimitRow label="5-hour window" limit={planUsage?.five_hour ?? null} now={now} />
+            <LimitRow label="This week" limit={planUsage?.seven_day ?? null} now={now} />
+            {!planUsage && (
+              <p className="empty-line">Shows once a running session reports it. Only Claude plans have these limits.</p>
+            )}
+          </div>
+          <div className="list usage-projects">
+            {usageRows.length === 0 ? (
+              <p className="empty-line">No session has reported its use yet.</p>
+            ) : (
+              usageRows.map((r) => (
+                <a key={r.projectId} className="usage-row" href={`#project/${r.projectId}`}>
+                  <span>{projects[r.projectId]?.name ?? 'Unknown project'}</span>
+                  <span className="muted">
+                    {r.sessions} {r.sessions === 1 ? 'session' : 'sessions'}
+                  </span>
+                  <strong>{fmtCost(r.costUsd)}</strong>
+                </a>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
       <section className="block" aria-labelledby="fleet-h">
         <div className="block-head">
           <h2 id="fleet-h">Fleet</h2>
@@ -156,6 +191,22 @@ export function Overview() {
           <FleetLanes sessions={list} projects={projects} range={range} now={now} />
         )}
       </section>
+    </div>
+  );
+}
+
+function LimitRow({ label, limit, now }: { label: string; limit: PlanLimit | null; now: number }) {
+  if (!limit) return null;
+  const pct = Math.max(0, Math.min(100, limit.used_percentage));
+  const resets = resetText(limit.resets_at, now);
+  return (
+    <div className="limit-row">
+      <span>{label}</span>
+      <span className={`meter meter--${level(pct)}`} role="meter" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
+        <span style={{ width: `${pct}%` }} />
+      </span>
+      <strong>{Math.round(pct)}%</strong>
+      <span className="muted">{resets ? `resets ${resets}` : ''}</span>
     </div>
   );
 }

@@ -760,3 +760,19 @@ a:hover .node-ring, a:focus-visible .node-ring { stroke-width: 2.8; }
   .links-row { display: none; }
   .msgs, .thread-head, .composer, .composer-note { padding-left: 16px; padding-right: 16px; }
 }
+
+/* Usage */
+.usage-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.usage-plan, .usage-projects { padding: 6px 0; }
+.limit-row { display: grid; grid-template-columns: 110px minmax(80px, 1fr) 44px minmax(0, 130px); align-items: center; gap: 12px; padding: 9px 16px; }
+.limit-row strong { text-align: right; font-variant-numeric: tabular-nums; }
+.meter { position: relative; height: 6px; border-radius: 3px; background: var(--well); box-shadow: var(--inset); overflow: hidden; }
+.meter > span { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--ink-3); }
+.meter--warn > span { background: var(--amber); }
+.meter--high > span { background: var(--red); }
+.usage-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 70px; gap: 12px; align-items: center; padding: 9px 16px; color: var(--ink); text-decoration: none; }
+.usage-row:hover { background: var(--hover); }
+.usage-row strong { text-align: right; font-variant-numeric: tabular-nums; }
+.ctx--warn { color: var(--amber-text); }
+.ctx--high { color: var(--red-text); }
+@media (max-width: 1100px) { .usage-grid { grid-template-columns: minmax(0, 1fr); } }

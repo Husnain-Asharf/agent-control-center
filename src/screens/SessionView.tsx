@@ -4,6 +4,7 @@ import { Lamp, STATUS_LABEL } from '../components/Lamp';
 import { errorText } from '../lib/errorText';
 import { eventText } from '../lib/eventText';
 import { clock, fmtTimer, folderLabel } from '../lib/format';
+import { fmtCost, level } from '../lib/usage';
 import { request } from '../lib/ipc';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
@@ -118,6 +119,37 @@ export function SessionView() {
               <code>{folder}</code>
             </dd>
           </div>
+          {session.usage && (
+            <>
+              <div>
+                <dt>Cost</dt>
+                <dd title="What the same use would cost on the API">{fmtCost(session.usage.cost_usd)}</dd>
+              </div>
+              {session.usage.context_used_percentage != null && (
+                <div>
+                  <dt>Context</dt>
+                  <dd className={`ctx ctx--${level(session.usage.context_used_percentage)}`}>
+                    {Math.round(session.usage.context_used_percentage)}% full
+                  </dd>
+                </div>
+              )}
+              {session.usage.model && (
+                <div>
+                  <dt>Model</dt>
+                  <dd>
+                    {session.usage.model}
+                    {session.usage.effort ? ` · ${session.usage.effort}` : ''}
+                  </dd>
+                </div>
+              )}
+              <div>
+                <dt>Lines</dt>
+                <dd>
+                  +{session.usage.lines_added} −{session.usage.lines_removed}
+                </dd>
+              </div>
+            </>
+          )}
           <div>
             <dt>Running</dt>
             <dd>{fmtTimer(elapsed)}</dd>
