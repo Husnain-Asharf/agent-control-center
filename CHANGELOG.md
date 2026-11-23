@@ -27,6 +27,22 @@ Usage numbers, more Settings, and fixes from testing 0.4.0.
 - Settings: a color editor with presets (Default, High contrast, Warm, Blue)
   and custom colors for each theme, and a Glass style (window vibrancy on
   macOS, translucent panels on Windows and Linux).
+- An Analytics screen: plan use, cost and memory over time (sampled once a
+  minute, kept 7 days), and a table of every session's cost, context,
+  memory, disk, lines, time working and waiting, with recommendations such
+  as compacting a session whose context is 70% full.
+- Compact a session (Claude Code's `/compact`) from its page or from
+  Analytics.
+- Settings, Restart: reload the window, restart the app, or restart the
+  daemon after a confirmation.
+- The base branch of a project can be changed on its page, and "Allow on the
+  base branch" can be undone with "Ask again".
+
+### Changed
+
+- The New session description names the session and is no longer sent to
+  Claude: Claude starts and waits for you. "Also send it to Claude as the
+  first message" sends it, as before.
 
 ### Fixed
 
@@ -35,6 +51,7 @@ Usage numbers, more Settings, and fixes from testing 0.4.0.
   the project folder ask no branch question.
 - "Allow once" in a toast or on the Overview no longer answers a branch
   question.
+- The branch question says "on no branch" when the folder is not on one.
 - The base branch also counts the remote's current default branch.
 - A branch switched outside a session shows in its header within 2 seconds.
 - Restarting a session whose folder was deleted says so instead of hanging.

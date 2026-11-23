@@ -93,6 +93,12 @@ Memory is that of Claude Code and every process it started, read from `ps` (not 
 
 **Removing.** A stopped session can be removed from the app with its history. For a session with its own worktree, you can also delete the worktree and its branch: `git worktree remove` keeps a worktree with changes, and `git branch -d` keeps a branch that is not merged, and the app says which it kept. Removing a project removes it and its sessions from the app. Folders and git history are never deleted.
 
+**Analytics.** While a session runs, the daemon keeps a sample once a minute in `acc.db` (table `samples`): the plan's use and each running session's cost, context and memory. Samples older than 7 days are deleted.
+
+**Compact.** Compact types `/compact` into an idle session's terminal, as you would. Claude Code then sums up the conversation so far, which frees context.
+
+**Restart.** Restart the daemon stops every session, like `pkill accd`, and the app starts a new daemon. Restart the app only reopens the window; sessions keep running.
+
 ## Keyboard shortcuts
 
 | Key | Action |
