@@ -14,9 +14,10 @@ Windows has no login shell. Sessions get the app's PATH, which an app started fr
 
 **Sessions in the project folder.** A new session works in the project's own folder, on the branch the folder is on. No worktree and no branch are made when it starts.
 
-- The first time it wants to edit a file, or to run a git command that commits on the current branch (`commit`, `merge`, `cherry-pick`, `revert`, `pull`, `am` or `rebase`, anywhere in the command), while the folder is on the project's base branch or on no branch, the inbox asks first.
+- The first time it wants to edit a file in the project folder, or to run a git command that commits on the current branch (`commit`, `merge`, `cherry-pick`, `revert`, `pull`, `am` or `rebase`, anywhere in the command), while the folder is on the project's base branch (as it was when the project was added, or the remote's default branch now) or on no branch, the inbox asks first. Edits outside the project folder go through the normal approvals.
 - **Make branch** creates `agent/<slug>` at the current commit without a checkout: the files, the index and uncommitted changes stay as they are, and no repo hook runs. Every session in the folder goes on with the new branch, and their own branch questions are settled by it.
 - **Allow on `<base>`** lets this session change the base branch, and it is not asked again. **Deny** blocks the call.
+- A yes answers the branch question only. It allows a file edit in the folder by itself, but a command such as `git commit -am x && git push` still goes through the normal approvals, and push still asks every time.
 - The question comes in every Claude Code permission mode, auto and accept-edits included.
 - A request on a protected path (below) waits for an approval in every mode too, because Claude Code reads files in its own folder without asking, and the project folder holds the real `.env` and key files that a worktree never has.
 - These sessions start with `--setting-sources user,project`, so the checkout's untracked `.claude/settings.local.json` is not loaded. Its saved rules would run commands without asking, and the inbox would never see them. Its local hooks and plugin choices are not loaded either.
@@ -83,6 +84,14 @@ To delete one, by the `rowid` from that list:
 ```
 sqlite3 ~/Library/Application\ Support/AgentControlCenter/acc.db "DELETE FROM rules WHERE rowid = 3;"
 ```
+
+## Usage, memory and disk
+
+Each session's Claude Code status line runs `acc-hook`, which passes Claude Code's report to the daemon: the session's cost, how full its context is, lines added and removed, the model and effort, and, on a Claude plan, the 5-hour and weekly limits. The line at the bottom of the session's terminal is the app's, so a status line set in your own Claude Code settings does not show in app sessions. On a Claude plan the cost is what the same use would cost on the API, not a charge.
+
+Memory is that of Claude Code and every process it started, read from `ps` (not on Windows). Disk is the session's conversation file in `~/.claude/projects/` and, for a session with its own worktree, the worktree (measured at most every 2 minutes). App data is the data directory, the SQLite database included.
+
+**Removing.** A stopped session can be removed from the app with its history. For a session with its own worktree, you can also delete the worktree and its branch: `git worktree remove` keeps a worktree with changes, and `git branch -d` keeps a branch that is not merged, and the app says which it kept. Removing a project removes it and its sessions from the app. Folders and git history are never deleted.
 
 ## Keyboard shortcuts
 

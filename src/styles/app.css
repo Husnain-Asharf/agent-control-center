@@ -787,3 +787,21 @@ a:hover .node-ring, a:focus-visible .node-ring { stroke-width: 2.8; }
 /* Daemon down */
 .offline-banner { margin: 0 0 16px; padding: 10px 14px; border-radius: var(--r-md); background: var(--red-soft); color: var(--red-text); font-size: 12.5px; }
 .usage-store { padding: 8px 16px 4px; font-size: 12px; }
+
+/* Coordination */
+.coord { display: flex; flex-direction: column; align-items: center; gap: 0; }
+.coord-folder { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 18px; border-radius: var(--r-lg); background: var(--raised); box-shadow: inset 0 1px 0 var(--hi), 0 1px 2px rgba(0,0,0,.16); border: 1px solid var(--line-strong); }
+.coord-row { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; width: 100%; padding-top: 26px; }
+.coord-row::before { content: ""; position: absolute; top: 0; left: 50%; height: 14px; border-left: 1px solid var(--line-strong); }
+.coord-row::after { content: ""; position: absolute; top: 14px; left: 12%; right: 12%; border-top: 1px solid var(--line-strong); }
+.coord-row--separate::before, .coord-row--separate::after { display: none; }
+.coord-row--separate { padding-top: 6px; }
+.coord-card { position: relative; display: flex; flex-direction: column; gap: 6px; width: 260px; padding: 12px 14px; border-radius: var(--r-lg); background: var(--panel); border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-size: 12.5px; }
+.coord-row:not(.coord-row--separate) .coord-card::before { content: ""; position: absolute; top: -12px; left: 50%; height: 12px; border-left: 1px solid var(--line-strong); }
+.coord-card:hover { background: var(--hover); }
+.coord-title { display: flex; align-items: center; gap: 8px; }
+.coord-card ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.coord-card li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coord-card li.is-overlap code { color: var(--amber-text); }
+.coord-overlaps { margin-top: 14px; padding: 8px 14px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--amber-text); font-size: 12.5px; }
+.coord-label { margin: 18px 0 0; font-size: 12px; }

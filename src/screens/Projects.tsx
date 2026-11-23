@@ -4,6 +4,7 @@ import { Icon } from '../components/Icon';
 import { Lamp } from '../components/Lamp';
 import { AddProjectDialog } from '../dialogs/AddProjectDialog';
 import { Dialog } from '../components/Dialog';
+import { Coordination } from '../components/Coordination';
 import { openNewSession } from '../dialogs/NewSessionDialog';
 import { monogram } from '../lib/format';
 import { needsYouForProject } from '../lib/needs';
@@ -164,6 +165,15 @@ export function ProjectPage() {
             </button>
           </div>
         </Dialog>
+      )}
+      {list.length > 0 && (
+        <section className="block" aria-labelledby="coord-h">
+          <div className="block-head">
+            <h2 id="coord-h">Coordination</h2>
+            <p>Who works where, the files each changed in the last 2 hours, and where they meet</p>
+          </div>
+          <Coordination project={project} sessions={list} now={now} />
+        </section>
       )}
       <section className="block" aria-labelledby="live-h">
         <div className="block-head">
