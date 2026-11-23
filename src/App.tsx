@@ -13,6 +13,7 @@ import { Toasts } from './components/Toasts';
 import { CommandPalette } from './components/CommandPalette';
 import { AddProjectDialog } from './dialogs/AddProjectDialog';
 import { Activity } from './screens/Activity';
+import { Analytics } from './screens/Analytics';
 import { Overview } from './screens/Overview';
 import { ProjectPage, Projects } from './screens/Projects';
 import { SessionView } from './screens/SessionView';
@@ -37,6 +38,7 @@ const TITLES = {
   projects: 'Projects',
   project: 'Project',
   activity: 'Activity',
+  analytics: 'Analytics',
   settings: 'Settings',
 } as const;
 
@@ -44,6 +46,7 @@ function Screen() {
   const route = useRoute();
   if (route.name === 'overview') return <Overview />;
   if (route.name === 'activity') return <Activity />;
+  if (route.name === 'analytics') return <Analytics />;
   if (route.name === 'projects') return <Projects />;
   if (route.name === 'project') return <ProjectPage />;
   if (route.name === 'sessions') return <Sessions />;

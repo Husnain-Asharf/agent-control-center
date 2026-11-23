@@ -50,6 +50,7 @@ export function CommandPalette({ onClose, onNewSession, onAddProject }: Props) {
       keys,
       run: () => go(hash),
     }));
+    all.push({ group: 'Go to', label: 'Analytics', hint: 'Use, cost and memory', icon: 'analytics', run: () => go('#analytics') });
     all.push({ group: 'Go to', label: 'Settings', hint: 'Theme, text size, sound', icon: 'settings', run: () => go('#settings') });
     Object.values(sessions)
       .sort((a, b) => b.started_at - a.started_at)

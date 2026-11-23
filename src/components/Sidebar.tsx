@@ -11,6 +11,7 @@ const NAV: { route: RouteName; hash: string; label: string; icon: IconName }[] =
   { route: 'projects', hash: '#projects', label: 'Projects', icon: 'projects' },
   { route: 'approvals', hash: '#approvals', label: 'Approvals', icon: 'approvals' },
   { route: 'activity', hash: '#activity', label: 'Activity', icon: 'activity' },
+  { route: 'analytics', hash: '#analytics', label: 'Analytics', icon: 'analytics' },
   { route: 'settings', hash: '#settings', label: 'Settings', icon: 'settings' },
 ];
 

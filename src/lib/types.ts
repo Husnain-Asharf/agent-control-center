@@ -169,3 +169,20 @@ export interface Toast {
   /** Buttons shown in the toast. The first one is the primary action. */
   actions?: { label: string; run: () => void }[];
 }
+
+/** One running session in a usage sample. */
+export interface SessionSample {
+  session_id: string;
+  cost_usd: number;
+  context_used_percentage: number | null;
+  memory_bytes: number | null;
+}
+
+/** What the daemon samples once a minute while a session runs. Kept 7 days. */
+export interface UsageSample {
+  ts: number;
+  /** The plan's 5-hour and weekly use, 0 to 100, when known. */
+  five_hour: number | null;
+  seven_day: number | null;
+  sessions: SessionSample[];
+}

@@ -8,6 +8,7 @@ export type RouteName =
   | 'projects'
   | 'project'
   | 'activity'
+  | 'analytics'
   | 'settings';
 
 export interface Route {
@@ -15,7 +16,7 @@ export interface Route {
   param: string | null;
 }
 
-const NAMES: RouteName[] = ['overview', 'sessions', 'session', 'approvals', 'projects', 'project', 'activity', 'settings'];
+const NAMES: RouteName[] = ['overview', 'sessions', 'session', 'approvals', 'projects', 'project', 'activity', 'analytics', 'settings'];
 
 export function parseHash(hash: string): Route {
   const [head, ...rest] = hash.replace(/^#\/?/, '').split('/');
