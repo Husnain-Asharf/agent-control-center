@@ -315,6 +315,12 @@ async fn dispatch(
         Request::UsageHistory { since } => to_json(&shared.state.lock().await.usage_history(since)?),
         Request::ProjectSetBase { project_id, base_branch } => to_json(&shared.state.lock().await.set_base(&project_id, &base_branch)?),
         Request::SessionResetBase { session_id } => to_json(&shared.state.lock().await.reset_base(&session_id)?),
+        Request::HelperStart { from_session, task } => shared.helper_start(&from_session, &task).await?,
+        Request::FolderSessions { from_session } => to_json(&shared.state.lock().await.folder_sessions(&from_session)?),
+        Request::SessionSend { from_session, to_session, text } => {
+            shared.state.lock().await.session_send(&from_session, &to_session, &text)?;
+            json!({})
+        }
         Request::DaemonRestart => {
             shared.restart.notify_one();
             json!({})

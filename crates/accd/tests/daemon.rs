@@ -495,8 +495,9 @@ async fn session_start_spawns_claude_in_worktree() {
 
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     let run = run_record(&s.worktree);
-    let settings = settings.to_string_lossy();
-    assert_eq!(run["args"], json!(["--settings", settings, "--session-id", s.id, "Fix the login bug"]));
+    let mcp = h.data.join("sessions").join(&s.id).join("mcp.json");
+    let (settings, mcp) = (settings.to_string_lossy(), mcp.to_string_lossy());
+    assert_eq!(run["args"], json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "Fix the login bug"]));
     assert_eq!(Path::new(run["cwd"].as_str().unwrap()), Path::new(&s.worktree));
     assert_eq!(run["session_id"], s.id);
     let rec = app.recorded("session.started").await;
@@ -1480,7 +1481,11 @@ async fn stop_then_restart_resumes_the_session() {
     let (_, chunks) = app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     assert_eq!(chunks[0].offset, 0);
     let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
-    assert_eq!(run_record(&s.worktree)["args"], json!(["--settings", settings.to_string_lossy(), "--resume", s.id]));
+    let mcp = h.data.join("sessions").join(&s.id).join("mcp.json");
+    assert_eq!(
+        run_record(&s.worktree)["args"],
+        json!(["--settings", settings.to_string_lossy(), "--mcp-config", mcp.to_string_lossy(), "--resume", s.id])
+    );
 
     let (code, _) = app.call_err(Request::SessionRestart { session_id: s.id.clone() }).await;
     assert_eq!(code, "bad_request", "restart of a running session");
@@ -1859,10 +1864,11 @@ async fn project_session_works_in_the_project_folder() {
     app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     let run = run_record(&s.worktree);
     let settings = h.data.join("sessions").join(&s.id).join("claude-settings.json");
-    let settings = settings.to_string_lossy();
+    let mcp = h.data.join("sessions").join(&s.id).join("mcp.json");
+    let (settings, mcp) = (settings.to_string_lossy(), mcp.to_string_lossy());
     assert_eq!(
         run["args"],
-        json!(["--settings", settings, "--session-id", s.id, "--setting-sources", "user,project", "Fix the login bug"])
+        json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "--setting-sources", "user,project", "Fix the login bug"])
     );
     assert_eq!(Path::new(run["cwd"].as_str().unwrap()), repo_root(&h.repo));
     stop(server).await;
@@ -2249,5 +2255,42 @@ async fn base_branch_edit_ask_again_and_usage_history() {
 
     let history: Vec<acc_protocol::UsageSample> = from(app.call(Request::UsageHistory { since: 0 }).await);
     assert!(history.is_empty(), "nothing sampled in the first minute");
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn a_lead_starts_a_helper_lists_the_folder_and_messages_it() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let lead = start_project_session(&mut app, &h.repo, "Build the shop").await;
+
+    let started = app.call(Request::HelperStart { from_session: lead.id.clone(), task: "Add the cart API in src/cart".into() }).await;
+    let helper_id = started["session_id"].as_str().unwrap().to_string();
+    let helper = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(s) if s.id == helper_id && s.lead_id.is_some()));
+    match helper.await {
+        DaemonEvent::SessionUpdated(s) => {
+            assert_eq!(s.lead_id.as_deref(), Some(lead.id.as_str()));
+            assert_eq!((s.mode, Path::new(&s.worktree)), (SessionMode::Project, repo_root(&h.repo).as_path()));
+        }
+        _ => unreachable!(),
+    }
+    app.output_until(&helper_id, &format!("ENV:{helper_id}")).await;
+
+    let list: Vec<acc_protocol::FolderSession> = from(app.call(Request::FolderSessions { from_session: lead.id.clone() }).await);
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|s| s.session_id == lead.id && s.is_you));
+    assert!(list.iter().any(|s| s.session_id == helper_id && s.lead_id.as_deref() == Some(lead.id.as_str())));
+
+    let sent = Request::SessionSend { from_session: lead.id.clone(), to_session: helper_id.clone(), text: "Start with\nthe model".into() };
+    app.call(sent).await;
+    app.output_until(&helper_id, "[Message from the session \"Build the shop\"").await;
+    let (code, _) = app.call_err(Request::SessionSend { from_session: lead.id.clone(), to_session: lead.id.clone(), text: "x".into() }).await;
+    assert_eq!(code, "bad_request", "not to itself");
+
+    // A lead with its own worktree cannot start helpers in it.
+    let own = start_session(&mut app, &h.repo, "Elsewhere").await;
+    let (code, _) = app.call_err(Request::HelperStart { from_session: own.id, task: "x".into() }).await;
+    assert_eq!(code, "bad_request");
     stop(server).await;
 }

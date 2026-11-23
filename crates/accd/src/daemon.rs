@@ -14,7 +14,7 @@ use crate::store::{AllowRule, NewEvent, Store};
 use crate::worktree::{self, Head, RepoInfo, WorktreeError};
 use acc_protocol::{
     Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, PlanUsage, Project, Session, SessionMode,
-    SessionRemoved, SessionSample, SessionStats, SessionStatus, SessionUsage, Snapshot, Stats, StatusChange, UsageSample,
+    FolderSession, SessionRemoved, SessionSample, SessionStats, SessionStatus, SessionUsage, Snapshot, Stats, StatusChange, UsageSample,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -355,6 +355,38 @@ impl Shared {
         self.state.lock().await.keep_sample(&sample);
     }
 
+    /// Starts a helper of `lead_id` in its project folder, with `task` as the
+    /// helper's first message. The request comes from the lead's own tool,
+    /// which Claude Code asks the user about first.
+    pub(crate) async fn helper_start(self: &Arc<Self>, lead_id: &str, task: &str) -> Result<Value, ApiError> {
+        let (project_id, mode) = {
+            let state = self.state.lock().await;
+            let lead = &state.entry(lead_id)?.session;
+            if is_finished(&lead.status) {
+                return Err(ApiError::bad_request("This session is not running."));
+            }
+            (lead.project_id.clone(), lead.mode)
+        };
+        if mode != SessionMode::Project {
+            return Err(ApiError::bad_request(
+                "Helpers share the project folder, and this session has a worktree of its own. Start the lead in the project folder.",
+            ));
+        }
+        let task = task.trim();
+        if task.is_empty() {
+            return Err(ApiError::bad_request("Give the helper a task."));
+        }
+        let session = self.session_start(&project_id, "claude", task, SessionMode::Project, true).await?;
+        let mut state = self.state.lock().await;
+        if let Some(entry) = state.sessions.get_mut(&session.id) {
+            entry.session.lead_id = Some(lead_id.to_string());
+            let s = entry.session.clone();
+            state.publish(&s);
+            state.session_event(&s, "helper.started", "agent", json!({ "lead_id": lead_id, "task": task }));
+        }
+        Ok(json!({ "session_id": session.id, "title": session.title }))
+    }
+
     /// Removes a session that is not running. See [`acc_protocol::Request::SessionRemove`].
     pub(crate) async fn session_remove(&self, session_id: &str, remove_worktree: bool) -> Result<SessionRemoved, ApiError> {
         // A session that was just stopped shows Stopped before its process has
@@ -532,6 +564,7 @@ impl Shared {
             mode,
             stay_on_base: false,
             usage: None,
+            lead_id: None,
             status: SessionStatus::Starting,
             status_since: now,
             started_at: now,
@@ -972,6 +1005,45 @@ impl Daemon {
     }
 
     /// Queues input for the agent. Input to a session that is not running is dropped.
+    /// The running sessions in the folder of `from`, `from` included.
+    pub(crate) fn folder_sessions(&self, from: &str) -> Result<Vec<FolderSession>, ApiError> {
+        let folder = self.entry(from)?.session.worktree.clone();
+        let mut list: Vec<FolderSession> = self
+            .sessions
+            .values()
+            .filter(|e| e.live.is_some() && e.session.worktree == folder)
+            .map(|e| FolderSession {
+                session_id: e.session.id.clone(),
+                title: e.session.title.clone(),
+                status: e.session.status.clone(),
+                lead_id: e.session.lead_id.clone(),
+                is_you: e.session.id == from,
+            })
+            .collect();
+        list.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.session_id.cmp(&b.session_id)));
+        Ok(list)
+    }
+
+    /// Types a message from one session into another running session in the
+    /// same folder, and presses Enter. Claude Code queues it if that session
+    /// is busy. Control characters are dropped and lines are joined, so the
+    /// text cannot press keys of its own.
+    pub(crate) fn session_send(&self, from: &str, to: &str, text: &str) -> Result<(), ApiError> {
+        let sender = &self.entry(from)?.session;
+        let target = self.entry(to)?;
+        if target.live.is_none() || target.session.worktree != sender.worktree || from == to {
+            return Err(ApiError::bad_request("Messages go to another running session in the same folder."));
+        }
+        let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.is_empty() {
+            return Err(ApiError::bad_request("The message is empty."));
+        }
+        let line = format!("[Message from the session \"{}\" ({})] {}\r", sender.title, sender.id, clean);
+        self.session_event(&target.session, "message.received", "agent", json!({ "from": from, "text": clean }));
+        self.queue_input(to, line.into_bytes())
+    }
+
     pub(crate) fn queue_input(&self, session_id: &str, data: Vec<u8>) -> Result<(), ApiError> {
         if let Some(live) = &self.entry(session_id)?.live {
             let _ = live.input.send(data);

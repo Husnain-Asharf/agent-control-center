@@ -199,10 +199,16 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     // The status line reports the session's cost, context and the plan's
     // limits on each update. acc-hook passes them to the daemon and prints
     // the line it gets back.
+    // The session's own tools (start a helper, list and message the sessions
+    // in its folder). Listing and messaging need no approval; starting a
+    // helper asks, as any other tool does.
+    let permissions = json!({ "allow": ["mcp__acc__list_sessions", "mcp__acc__send_message"] });
     let mut status_line = hook_command(hook_bin);
     status_line["refreshInterval"] = json!(STATUS_REFRESH_SECS);
     let path = settings_path(dir);
-    std::fs::write(&path, serde_json::to_vec_pretty(&json!({ "hooks": hooks, "statusLine": status_line }))?)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&json!({ "hooks": hooks, "statusLine": status_line, "permissions": permissions }))?)?;
+    let mcp = json!({ "mcpServers": { "acc": { "type": "stdio", "command": hook_bin.to_string_lossy(), "args": ["mcp"] } } });
+    std::fs::write(mcp_path(dir), serde_json::to_vec_pretty(&mcp)?)?;
     Ok(path)
 }
 
@@ -280,15 +286,31 @@ pub fn status_text(usage: &SessionUsage, plan: Option<&PlanUsage>) -> String {
 
 /// `prompt`, when given, is Claude's first message. Without it Claude starts
 /// and waits for the user to type.
+/// Where [`write_settings`] writes the session's tool server config, next to the settings.
+pub fn mcp_path(dir: &Path) -> PathBuf {
+    dir.join("mcp.json")
+}
+
+/// `--mcp-config` takes several values, so it goes before options that end
+/// it, never right before the prompt.
+fn mcp_args(settings: &Path) -> Vec<String> {
+    let dir = settings.parent().unwrap_or(Path::new("."));
+    vec!["--mcp-config".into(), mcp_path(dir).to_string_lossy().into_owned()]
+}
+
 pub fn launch_args(settings: &Path, session_id: &str, prompt: Option<&str>, mode: SessionMode) -> Vec<String> {
-    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned(), "--session-id".into(), session_id.into()];
+    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned()];
+    args.extend(mcp_args(settings));
+    args.extend(["--session-id".to_string(), session_id.to_string()]);
     args.extend(setting_sources(mode));
     args.extend(prompt.map(str::to_string));
     args
 }
 
 pub fn resume_args(settings: &Path, session_id: &str, mode: SessionMode) -> Vec<String> {
-    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned(), "--resume".into(), session_id.into()];
+    let mut args = vec!["--settings".into(), settings.to_string_lossy().into_owned()];
+    args.extend(mcp_args(settings));
+    args.extend(["--resume".to_string(), session_id.to_string()]);
     args.extend(setting_sources(mode));
     args
 }
@@ -412,19 +434,25 @@ mod tests {
         assert_eq!(v["statusLine"]["command"], v["hooks"]["Stop"][0]["hooks"][0]["command"]);
     }
 
+    /// Where the tool server config of `/d/s.json` is.
+    #[cfg(unix)]
+    const MCP: &str = "/d/mcp.json";
+    #[cfg(windows)]
+    const MCP: &str = "/d\\mcp.json";
+
     #[test]
     fn launch_args_order() {
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Worktree),
-            vec!["--settings", "/d/s.json", "--session-id", "abc", "Fix the bug"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "Fix the bug"]
         );
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Project),
-            vec!["--settings", "/d/s.json", "--session-id", "abc", "--setting-sources", "user,project", "Fix the bug"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "--setting-sources", "user,project", "Fix the bug"]
         );
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", None, SessionMode::Worktree),
-            vec!["--settings", "/d/s.json", "--session-id", "abc"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc"]
         );
     }
 
@@ -432,11 +460,11 @@ mod tests {
     fn resume_args_order() {
         assert_eq!(
             resume_args(Path::new("/d/s.json"), "abc", SessionMode::Worktree),
-            vec!["--settings", "/d/s.json", "--resume", "abc"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--resume", "abc"]
         );
         assert_eq!(
             resume_args(Path::new("/d/s.json"), "abc", SessionMode::Project),
-            vec!["--settings", "/d/s.json", "--resume", "abc", "--setting-sources", "user,project"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--resume", "abc", "--setting-sources", "user,project"]
         );
     }
 

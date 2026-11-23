@@ -55,6 +55,9 @@ pub struct Session {
     /// What Claude Code last reported to its status line. `None` until then.
     #[serde(default)]
     pub usage: Option<SessionUsage>,
+    /// The session that started this one as its helper.
+    #[serde(default)]
+    pub lead_id: Option<String>,
     pub status: SessionStatus,
     pub status_since: i64,
     pub started_at: i64,
@@ -213,6 +216,14 @@ pub enum Request {
     SessionResetBase { session_id: String },
     /// Ends the daemon and its sessions. The app starts a new one.
     DaemonRestart,
+    /// From a session's own tools: start a helper session in its project
+    /// folder, with `task` as its first message.
+    HelperStart { from_session: String, task: String },
+    /// From a session's own tools: the running sessions in its folder.
+    FolderSessions { from_session: String },
+    /// From a session's own tools: type `text` into another running session
+    /// in the same folder, as a message from this one.
+    SessionSend { from_session: String, to_session: String, text: String },
     ApprovalDecide { approval_id: String, decision: Decision },
     EventsList { session_id: Option<String>, limit: u32 },
     Hook { session_id: String, payload: serde_json::Value },
@@ -239,6 +250,17 @@ pub enum DaemonEvent {
     PlanUsageUpdated(PlanUsage),
     SessionRemoved { session_id: String },
     ProjectRemoved { project_id: String },
+}
+
+/// A running session in a folder, as a session's own tools list it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FolderSession {
+    pub session_id: String,
+    pub title: String,
+    pub status: SessionStatus,
+    pub lead_id: Option<String>,
+    /// The session that asked.
+    pub is_you: bool,
 }
 
 /// What removing a session did.

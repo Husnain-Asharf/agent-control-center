@@ -92,9 +92,12 @@ fn record(args: &[String]) {
         "path": env("PATH"),
         "batch_command": env("ACC_BATCH_COMMAND"),
     });
-    // Written whole and then renamed, so a reader never sees half of it.
-    std::fs::write("stand-in-run.json.tmp", record.to_string()).expect("write the run record");
-    std::fs::rename("stand-in-run.json.tmp", "stand-in-run.json").expect("move the run record");
+    // Written whole and then renamed, so a reader never sees half of it. The
+    // temporary name is this process's own: sessions that share a folder run
+    // several stand-ins in it.
+    let tmp = format!("stand-in-run.json.{}.tmp", std::process::id());
+    std::fs::write(&tmp, record.to_string()).expect("write the run record");
+    std::fs::rename(&tmp, "stand-in-run.json").expect("move the run record");
 }
 
 /// Prints `line 1` to `line <n>`. A `steady` stream pauses a moment every
