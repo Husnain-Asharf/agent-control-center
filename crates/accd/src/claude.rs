@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn interpret_unknown_is_nothing() {
-        assert_eq!(interpret_hook(&json!({"hook_event_name":"SubagentStop"})), HookEffect::Nothing);
+        assert_eq!(interpret_hook(&json!({"hook_event_name":"TeammateIdle"})), HookEffect::Nothing);
         assert_eq!(interpret_hook(&json!({"hook_event_name":"Whatever"})), HookEffect::Nothing);
     }
 
