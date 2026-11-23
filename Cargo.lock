@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acc-hook"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acc-protocol",
  "acc-transport",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "acc-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "serde",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "acc-transport"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acc-protocol",
  "tempfile",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "accd"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acc-protocol",
  "acc-transport",
@@ -62,7 +62,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-control-center"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "acc-protocol",
  "acc-transport",

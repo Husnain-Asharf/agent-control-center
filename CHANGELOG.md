@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-23
+
+Windows fixes and updated dependencies.
+
+### Fixed
+
+- On Windows, git revisions such as `HEAD~1` no longer show as protected
+  paths. A short (8.3) name counts as protected only when it can stand for a
+  protected name, such as `CLAUDE~1`; other ones still ask each time.
+- The Windows `-setup.exe` ends the daemon before it upgrades or uninstalls
+  the app, so it no longer needs `taskkill` first. Running sessions end with
+  the daemon.
+
+### Changed
+
+- React and react-dom 19.3.1, Vitest 5.1.1, and the CI actions
+  actions/checkout 7, actions/setup-node 7 and tauri-action 1.
+
+### Known limitations
+
+- The `.msi` does not end the daemon: run `taskkill /IM accd.exe /F` before you
+  upgrade or uninstall with it, and before you uninstall 0.3.0.
+
 ## [0.3.0] - 2026-11-23
 
 Windows support.
@@ -118,6 +141,7 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.3.1]: ../../releases/tag/v0.3.1
 [0.3.0]: ../../releases/tag/v0.3.0
 [0.2.0]: ../../releases/tag/v0.2.0
 [0.1.0]: ../../releases/tag/v0.1.0
