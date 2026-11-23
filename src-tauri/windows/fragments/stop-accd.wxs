@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ends the daemon, accd.exe, before the .msi checks which files are in use,
+  when it installs, upgrades or removes the app. accd keeps running after the
+  app's window closes, and Windows cannot replace or remove the files of a
+  running program. taskkill fails when accd is not running, which is ignored.
+  Set in tauri.conf.json as bundle.windows.wix.fragmentPaths, and linked in
+  through its componentGroupRefs.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <Property Id="WixQuietExecCmdLine" Value="taskkill.exe /F /IM accd.exe" />
+    <CustomAction Id="StopAccd" BinaryKey="WixCA" DllEntry="WixQuietExec" Execute="immediate" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="StopAccd" Before="InstallValidate" />
+    </InstallExecuteSequence>
+    <ComponentGroup Id="StopAccdGroup" />
+  </Fragment>
+</Wix>

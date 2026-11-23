@@ -47,6 +47,15 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["./windows/fragments/stop-accd.wxs"],
+        "componentGroupRefs": ["StopAccdGroup"]
+      }
     }
   }
 }
