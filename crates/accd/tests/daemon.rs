@@ -2124,8 +2124,12 @@ async fn a_stopped_session_can_be_removed_with_its_worktree() {
 
     let (code, message) = app.call_err(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await;
     assert_eq!(code, "bad_request", "{message}");
+    // The stand-in writes its run record into the worktree; wait for it, then
+    // drop it, so the worktree has no untracked files git would keep it for.
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
     app.call(Request::SessionStop { session_id: s.id.clone() }).await;
     app.status(&s.id, SessionStatus::Stopped).await;
+    git(Path::new(&s.worktree), &["clean", "-fdxq"]);
 
     let removed: acc_protocol::SessionRemoved =
         from(app.call(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await);
