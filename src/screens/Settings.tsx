@@ -14,7 +14,20 @@ import {
   type ColorKey,
 } from '../lib/colors';
 import { keyHints, platform } from '../lib/platform';
-import { STYLES, STYLE_LABEL, styleNote } from '../lib/style';
+import {
+  BLUR_MAX,
+  BLUR_MIN,
+  BLUR_STEP,
+  OPACITY_MAX,
+  OPACITY_MIN,
+  OPACITY_START,
+  OPACITY_STEP,
+  STYLES,
+  STYLE_LABEL,
+  blurNote,
+  opacityReads,
+  styleNote,
+} from '../lib/style';
 import type { Theme } from '../lib/types';
 import { useStore } from '../store/store';
 
@@ -49,6 +62,92 @@ function Choice<T extends string | number>({
 
 function Switch({ label, on, onToggle }: { label: string; on: boolean; onToggle: () => void }) {
   return <button className="switch" type="button" role="switch" aria-checked={on} aria-label={label} onClick={onToggle} />;
+}
+
+/** A slider with its value beside it. */
+function Slider({
+  label,
+  min,
+  max,
+  step,
+  value,
+  unit,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  unit: string;
+  disabled?: boolean;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className="slider">
+      <input
+        type="range"
+        className="slider-input"
+        aria-label={label}
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <span className="slider-value">{`${value}${unit}`}</span>
+    </div>
+  );
+}
+
+/** Blur and opacity, shown while the style is Glass. */
+function GlassRows() {
+  const blur = useStore((s) => s.glassBlur);
+  const setBlur = useStore((s) => s.setGlassBlur);
+  const opacity = useStore((s) => s.glassOpacity);
+  const setOpacity = useStore((s) => s.setGlassOpacity);
+  // Re-read when the colors change, since the check reads them off <html>.
+  useStore((s) => s.colors);
+  useStore((s) => s.theme);
+  const css = typeof document === 'undefined' ? null : getComputedStyle(document.documentElement);
+  const reads = !css || opacityReads((n) => css.getPropertyValue(n), opacity);
+  const auto = opacity === null;
+  return (
+    <>
+      <Row title="Blur" note={blurNote(platform)}>
+        <Slider label="Blur" min={BLUR_MIN} max={BLUR_MAX} step={BLUR_STEP} value={blur} unit="px" onChange={setBlur} />
+      </Row>
+      <Row
+        title="Opacity"
+        note={
+          auto
+            ? 'Auto keeps the panels as clear as they can be while text still reads.'
+            : reads
+              ? 'How solid the panels are. Popups stay a little more solid.'
+              : 'Some text may be hard to read over a very light or dark desktop at this opacity.'
+        }
+      >
+        <div className="slider-row">
+          <label className="check">
+            <input type="checkbox" checked={auto} onChange={(e) => setOpacity(e.target.checked ? null : OPACITY_START)} />
+            Auto
+          </label>
+          <Slider
+            label="Opacity"
+            min={OPACITY_MIN}
+            max={OPACITY_MAX}
+            step={OPACITY_STEP}
+            value={opacity ?? OPACITY_START}
+            unit="%"
+            disabled={auto}
+            onChange={setOpacity}
+          />
+        </div>
+      </Row>
+    </>
+  );
 }
 
 function Row({ title, note, children }: { title: string; note?: ReactNode; children: ReactNode }) {
@@ -174,6 +273,7 @@ export function Settings() {
           <Row title="Style" note={styleNote(platform)}>
             <Choice label="Style" options={STYLES} value={style} text={(v) => STYLE_LABEL[v]} onChange={setStyle} />
           </Row>
+          {style === 'glass' && <GlassRows />}
           <Row
             title="Text size"
             note={

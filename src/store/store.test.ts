@@ -245,6 +245,48 @@ describe('text settings', () => {
   });
 });
 
+describe('glass settings', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  const load = async (saved: Record<string, string>) => {
+    const writes: Record<string, string> = {};
+    vi.stubGlobal('document', { documentElement: { dataset: {} } });
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => saved[k] ?? null,
+      setItem: (k: string, v: string) => {
+        writes[k] = v;
+      },
+    });
+    vi.resetModules();
+    return { fresh: await import('./store'), writes };
+  };
+
+  it('reads saved blur and opacity', async () => {
+    const { fresh } = await load({ 'acc-glass-blur': '24', 'acc-glass-opacity': '45' });
+    const s = fresh.useStore.getState();
+    expect([s.glassBlur, s.glassOpacity]).toEqual([24, 45]);
+  });
+
+  it('defaults to 16px and Auto', async () => {
+    const { fresh } = await load({});
+    const s = fresh.useStore.getState();
+    expect([s.glassBlur, s.glassOpacity]).toEqual([16, null]);
+  });
+
+  it('saves changes, and Auto as auto', async () => {
+    const { fresh, writes } = await load({});
+    fresh.useStore.getState().setGlassBlur(30);
+    fresh.useStore.getState().setGlassOpacity(70);
+    expect(writes).toEqual({ 'acc-glass-blur': '30', 'acc-glass-opacity': '70' });
+    fresh.useStore.getState().setGlassOpacity(null);
+    expect(writes['acc-glass-opacity']).toBe('auto');
+    expect(fresh.useStore.getState().glassOpacity).toBeNull();
+  });
+});
+
 describe('colors', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

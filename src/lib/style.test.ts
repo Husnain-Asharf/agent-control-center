@@ -3,8 +3,14 @@ import appCss from '../styles/app.css?raw';
 import tokens from '../styles/tokens.css?raw';
 import { colorDistance, presetColors, PRESET_IDS } from './colors';
 import {
+  DEFAULT_BLUR,
   DEFAULT_STYLE,
   GLASS_VARS,
+  blurNote,
+  opacityReads,
+  parseBlur,
+  parseOpacity,
+  surfaceAlpha,
   glassAlpha,
   glassVars,
   liftText,
@@ -149,7 +155,60 @@ describe('glass colors', () => {
   });
 });
 
+describe('saved blur and opacity', () => {
+  it('reads a saved blur and keeps it in range and on a step', () => {
+    expect(parseBlur('24')).toBe(24);
+    expect(parseBlur('0')).toBe(0);
+    expect(parseBlur('99')).toBe(40);
+    expect(parseBlur('-3')).toBe(0);
+    expect(parseBlur('7')).toBe(8);
+  });
+  it.each([null, '', 'soft'])('falls back to the default blur for %j', (saved) => {
+    expect(parseBlur(saved)).toBe(DEFAULT_BLUR);
+  });
+  it('reads a saved opacity and keeps it in range', () => {
+    expect(parseOpacity('55')).toBe(55);
+    expect(parseOpacity('5')).toBe(20);
+    expect(parseOpacity('150')).toBe(100);
+  });
+  it.each([null, '', 'auto', 'clear'])('treats %j as Auto', (saved) => {
+    expect(parseOpacity(saved)).toBeNull();
+  });
+  it('says on macOS that 0 shows the desktop sharp', () => {
+    expect(blurNote('mac')).toContain('0 shows it sharp');
+    expect(blurNote('windows')).not.toContain('desktop');
+  });
+});
+
+describe('chosen opacity', () => {
+  it('uses it for the frame and keeps panels and popups more solid', () => {
+    const out = glassVars(reader(DARK), 40);
+    expect(alphaOf(out['--glass-chrome'])).toBe(0.4);
+    expect(alphaOf(out['--glass-panel'])).toBeGreaterThan(0.4);
+    expect(alphaOf(out['--glass-raised'])).toBeGreaterThan(alphaOf(out['--glass-panel']));
+  });
+  it('is fully solid at 100%', () => {
+    expect(surfaceAlpha(100, 0)).toBe(1);
+    expect(surfaceAlpha(100, 0.6)).toBe(1);
+  });
+  it('still lifts faint text as far as it can', () => {
+    const out = glassVars(reader(DARK), 40);
+    expect(out['--ink-3']).toBeDefined();
+  });
+  it('warns only when the main text stops reading', () => {
+    expect(opacityReads(reader(DARK), null)).toBe(true);
+    expect(opacityReads(reader(DARK), 100)).toBe(true);
+    expect(opacityReads(reader(DARK), 20)).toBe(false);
+  });
+});
+
 describe('glass css', () => {
+  it('blurs by the chosen amount', () => {
+    const glass = appCss.slice(appCss.indexOf('/* Glass'));
+    expect(glass).not.toMatch(/blur\(\d+px\)/);
+    expect(glass).toContain('blur(var(--glass-blur, 16px))');
+  });
+
   it('keeps the solid look opaque', () => {
     // With a transparent window, Solid relies on this to hide the desktop.
     expect(appCss).toMatch(/^body \{ background: var\(--panel\);/m);
