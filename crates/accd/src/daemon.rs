@@ -357,6 +357,12 @@ impl Shared {
 
     /// Removes a session that is not running. See [`acc_protocol::Request::SessionRemove`].
     pub(crate) async fn session_remove(&self, session_id: &str, remove_worktree: bool) -> Result<SessionRemoved, ApiError> {
+        // A session that was just stopped shows Stopped before its process has
+        // exited. Give it the same moment to exit that a restart gives it.
+        let stopping = self.state.lock().await.stopping_run(session_id)?;
+        if let Some(mut ended) = stopping {
+            let _ = tokio::time::timeout(STOP_WAIT, ended.changed()).await;
+        }
         let (session, root) = {
             let state = self.state.lock().await;
             let entry = state.entry(session_id)?;
@@ -381,6 +387,14 @@ impl Shared {
 
     /// Removes a project with no running session, with its sessions and rules.
     pub(crate) async fn project_remove(&self, project_id: &str) -> Result<(), ApiError> {
+        let stopping: Vec<_> = {
+            let state = self.state.lock().await;
+            let ids: Vec<String> = state.sessions.values().filter(|e| e.session.project_id == project_id).map(|e| e.session.id.clone()).collect();
+            ids.iter().filter_map(|id| state.stopping_run(id).ok().flatten()).collect()
+        };
+        for mut ended in stopping {
+            let _ = tokio::time::timeout(STOP_WAIT, ended.changed()).await;
+        }
         let ids = self.state.lock().await.forget_project(project_id)?;
         for id in ids {
             let _ = std::fs::remove_dir_all(self.cfg.paths.session_dir(&id));
