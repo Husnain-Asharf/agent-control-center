@@ -41,12 +41,4 @@ jobs:
       - run: npm run build
       # tauri-build needs the externalBin sidecars to exist.
       - run: npm run sidecars
-      - run: cargo test --workspace 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
-        shell: bash
-      # Temporary: report the failing tests as annotations, since logs need a token to read.
-      - if: failure()
-        shell: bash
-        run: |
-          grep -E "^test .* FAILED|panicked at|^failures:|assertion|left:|right:|error(\[|:)" "$RUNNER_TEMP/cargo-test.log" | head -40 | while IFS= read -r line; do
-            echo "::error::${line//%/%25}"
-          done
+      - run: cargo test --workspace
