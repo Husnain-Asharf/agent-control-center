@@ -257,6 +257,11 @@ pub fn parse_status(payload: &Value, now: i64) -> (SessionUsage, Option<PlanUsag
     (usage, plan)
 }
 
+/// The SessionStart hook reply that adds `context` to the session's start.
+pub fn session_start_reply(context: &str) -> String {
+    json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}).to_string()
+}
+
 /// The line shown at the bottom of the session's terminal.
 pub fn status_text(usage: &SessionUsage, plan: Option<&PlanUsage>) -> String {
     let mut parts = Vec::new();
@@ -291,6 +296,8 @@ pub enum HookEffect {
     Status(SessionStatus),
     /// Claude Code's status line input: the session's use and the plan's limits.
     StatusLine,
+    /// The session started or resumed: it can be told who else works in its folder.
+    SessionStart,
     /// A tool is about to run: the session is Working, and the daemon checks
     /// the call (the branch question, secret reads in the project folder).
     PreTool { tool: String, summary: String, input: Value },
@@ -310,6 +317,7 @@ pub fn interpret_hook(payload: &Value) -> HookEffect {
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
     match event {
         "UserPromptSubmit" => HookEffect::Status(SessionStatus::Working),
+        "SessionStart" => HookEffect::SessionStart,
         "PreToolUse" => {
             let tool = tool.unwrap_or("unknown");
             HookEffect::PreTool { tool: tool.to_string(), summary: summarize_tool(tool, &input), input }
@@ -516,7 +524,7 @@ mod tests {
 
     #[test]
     fn interpret_unknown_is_nothing() {
-        assert_eq!(interpret_hook(&json!({"hook_event_name":"SessionStart"})), HookEffect::Nothing);
+        assert_eq!(interpret_hook(&json!({"hook_event_name":"SubagentStop"})), HookEffect::Nothing);
         assert_eq!(interpret_hook(&json!({"hook_event_name":"Whatever"})), HookEffect::Nothing);
     }
 

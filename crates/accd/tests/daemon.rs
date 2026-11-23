@@ -2178,3 +2178,20 @@ async fn a_project_is_removed_with_its_sessions_and_stats_measure_the_rest() {
     assert!(h.repo.join("README.md").exists(), "the folder stays");
     stop(server).await;
 }
+
+#[tokio::test]
+async fn a_session_in_a_shared_folder_is_told_about_the_others() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let one = start_project_session(&mut app, &h.repo, "Add the API").await;
+    let mut hk = hook(&h.socket(), &one.id, json!({"hook_event_name": "SessionStart"})).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT, "alone in the folder");
+
+    let two = start_project_session(&mut app, &h.repo, "Add the screens").await;
+    let mut hk = hook(&h.socket(), &two.id, json!({"hook_event_name": "SessionStart"})).await;
+    let out: Value = serde_json::from_str(&hook_reply(&mut hk).await.stdout.unwrap()).unwrap();
+    let note = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(note.contains("Add the API") && note.contains("SendMessage"), "{note}");
+    stop(server).await;
+}

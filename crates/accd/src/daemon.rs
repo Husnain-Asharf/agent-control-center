@@ -1086,6 +1086,33 @@ impl Daemon {
         text
     }
 
+    /// For a session in the project folder: a note on the other running
+    /// sessions there, so they can share the work. `None` when it is alone.
+    pub(crate) fn folder_note(&self, session_id: &str) -> Option<String> {
+        let me = &self.sessions.get(session_id)?.session;
+        if me.mode != SessionMode::Project {
+            return None;
+        }
+        let mut others: Vec<&Session> = self
+            .sessions
+            .values()
+            .filter(|e| e.live.is_some() && e.session.id != session_id && e.session.worktree == me.worktree)
+            .map(|e| &e.session)
+            .collect();
+        if others.is_empty() {
+            return None;
+        }
+        others.sort_by_key(|s| s.started_at);
+        let list: Vec<String> = others.iter().map(|s| format!("- {}", s.title)).collect();
+        Some(format!(
+            "Agent Control Center: this session shares its folder ({}) with {} other running Claude Code {}, so their changes show up here at once:\n{}\nWork on different files than they do. Use the built-in messages between local sessions (ListAgents, SendMessage) to split the work or ask before you touch a file another session is changing.",
+            me.worktree,
+            others.len(),
+            if others.len() == 1 { "session" } else { "sessions" },
+            list.join("\n")
+        ))
+    }
+
     pub(crate) fn session_folder(&self, session_id: &str) -> Option<PathBuf> {
         self.sessions.get(session_id).map(|e| PathBuf::from(&e.session.worktree))
     }

@@ -355,6 +355,10 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
             shared.state.lock().await.tool_used(session_id, tool, &summary);
             return Some(silent);
         }
+        HookEffect::SessionStart => {
+            let note = shared.state.lock().await.folder_note(session_id);
+            return Some(HookReply { stdout: note.map(|n| claude::session_start_reply(&n)), exit_code: 0 });
+        }
         HookEffect::StatusLine => {
             let text = shared.state.lock().await.status_reported(session_id, payload);
             return Some(HookReply { stdout: Some(text), exit_code: 0 });
