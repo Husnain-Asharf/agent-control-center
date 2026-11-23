@@ -1586,6 +1586,8 @@ async fn windows_path_forms_always_ask() {
         (bash("cp README.md D:notes"), windows_path),
         (bash("cp README.md .claude./settings.local.json"), "protected path"),
         (bash("cp README.md CLAUDE~1/x"), "protected path"),
+        // A git revision reads as a short name, but not as a protected one.
+        (bash("git diff HEAD~1"), windows_path),
     ] {
         // Always allow lets this request through once and adds no rule.
         let mut hk = hook(&h.socket(), &s.id, payload.clone()).await;

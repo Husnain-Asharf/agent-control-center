@@ -77,6 +77,12 @@ const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
 const PROTECTED_NAMES: [&str; 11] = [
     ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".claude", ".mcp.json",
 ];
+/// A file whose name starts with this is protected: `.env`, `.env.local`, `.envrc`.
+const PROTECTED_PREFIX: &str = ".env";
+/// A file whose name ends with one of these is protected: `server.pem`, `id.key`.
+const PROTECTED_EXTENSIONS: [&str; 2] = [".pem", ".key"];
+/// The folder that holds the [`CREDENTIAL_CONFIG_DIRS`].
+const CONFIG_DIR: &str = ".config";
 /// Credential folders under `.config`. A path through `.config/<name>` is protected.
 const CREDENTIAL_CONFIG_DIRS: [&str; 2] = ["gh", "gcloud"];
 /// Programs that run code given on their command line, with an argument
@@ -1150,6 +1156,10 @@ fn rule_for_on(tool: &str, summary: &str, input: &Value, worktree: &Path, platfo
             Some(command_prefix(command, worktree, platform)?)
         }
     };
+    // On Windows any other short name, such as one in a URL, asks each time too.
+    if request_has_short_name(summary, input, worktree, platform) {
+        return Err(OnceOnly::WindowsPath);
+    }
     Ok(AllowRule { tool: tool.to_string(), prefix })
 }
 
@@ -1695,19 +1705,24 @@ fn shell_words(command: &str) -> Option<Vec<(&str, String)>> {
 /// [`PROTECTED_NAMES`], or one through `.config/gh` or `.config/gcloud`.
 /// Case-insensitive. On Windows a backslash separates folders too, a name
 /// counts without the dots and spaces that Windows drops from its end
-/// (`.claude.` is `.claude`), and a short (8.3) name such as `CLAUDE~1`
-/// counts as protected, as it can stand for any of them, unless it is in the
-/// worktree's own path. The UI flags these paths too, but this check is the
-/// one that is enforced, so it must not be looser.
+/// (`.claude.` is `.claude`), and a short (8.3) name that can stand for a
+/// protected name ([`is_protected_short_name`]) counts too, unless it is in
+/// the worktree's own path. The UI flags these paths too, but this check is
+/// the one that is enforced, so it must not be looser.
 fn touches_protected_path(summary: &str, worktree: &Path, platform: Platform) -> bool {
     let lower = summary.to_lowercase();
-    let names = spellings(&lower, platform).iter().any(|text| {
-        text.split(|c: char| c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c))
-            .any(|token| is_protected_token(token, platform))
-    });
+    let names = spellings(&lower, platform).iter().any(|text| path_tokens(text).any(|token| is_protected_token(token, platform)));
     names
         || (platform == Platform::Windows
-            && spellings(&without_worktree(&lower, worktree), platform).iter().any(|text| has_short_name(text)))
+            && spellings(&without_worktree(&lower, worktree), platform)
+                .iter()
+                .any(|text| path_tokens(text).any(|token| has_protected_short_name(token, platform))))
+}
+
+/// The words of a text that are checked for protected paths: the text split
+/// at whitespace and at the [`PATH_TOKEN_SEPARATORS`].
+fn path_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c))
 }
 
 /// The texts a summary is checked as. Quotes and escapes can split a name
@@ -1725,11 +1740,69 @@ fn spellings(text: &str, platform: Platform) -> Vec<String> {
 fn is_protected_token(token: &str, platform: Platform) -> bool {
     let parts: Vec<&str> = token.split(path_separators(platform)).map(|part| opened_name(part, platform)).collect();
     let name = parts.iter().rev().find(|part| !part.is_empty()).copied().unwrap_or_default();
-    name.starts_with(".env")
-        || name.ends_with(".pem")
-        || name.ends_with(".key")
+    name.starts_with(PROTECTED_PREFIX)
+        || PROTECTED_EXTENSIONS.iter().any(|extension| name.ends_with(extension))
         || parts.iter().any(|part| PROTECTED_NAMES.contains(part))
-        || parts.windows(2).any(|pair| pair[0] == ".config" && CREDENTIAL_CONFIG_DIRS.contains(&pair[1]))
+        || parts.windows(2).any(|pair| pair[0] == CONFIG_DIR && CREDENTIAL_CONFIG_DIRS.contains(&pair[1]))
+}
+
+/// Whether a token holds, on Windows, a short (8.3) name that can stand for
+/// a protected name. Unix has no short names.
+fn has_protected_short_name(token: &str, platform: Platform) -> bool {
+    platform == Platform::Windows
+        && token.split(path_separators(platform)).any(|part| is_protected_short_name(opened_name(part, platform)))
+}
+
+/// Whether `name`, a lowercase folder or file name, is a short (8.3) name
+/// that can stand for a protected name. Windows makes a short name from the
+/// start of the long one, and after four names with the same start it keeps
+/// only the first two characters and adds a hash (`CL3F2A~1` for `.claude`).
+/// So a short name counts when its first two characters are those of a
+/// protected name's short base ([`protected_short_starts`]), or when its
+/// extension is that of a protected file (`SERVER~1.PEM`, `SETTIN~1.JSO`).
+/// Any other one, such as the git revision `HEAD~1`, does not.
+fn is_protected_short_name(name: &str) -> bool {
+    let Some(tilde) = short_name_tilde(name) else { return false };
+    let after_number = name[tilde + 1..].trim_start_matches(|c: char| c.is_ascii_digit());
+    let extension: String = after_number.strip_prefix('.').unwrap_or_default().chars().take(3).collect();
+    protected_short_starts().iter().any(|start| name.starts_with(start.as_str()))
+        || (!extension.is_empty() && protected_short_extensions().contains(&extension))
+}
+
+/// The short (8.3) form Windows makes of a long name, lowercase and without
+/// its `~1`: a base and an extension. The base is the name without its
+/// leading dots and its extension, and without other dots and spaces, cut
+/// to 6 characters. The extension is what follows the last dot that does
+/// not lead the name, cut to 3. `.claude` is `claude`, `.mcp.json` is `mcp`
+/// with the extension `jso`.
+fn short_form(name: &str) -> (String, String) {
+    let name = name.trim_start_matches('.');
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    let kept = |text: &str, length| text.chars().filter(|c| !matches!(c, '.' | ' ')).take(length).collect();
+    (kept(stem, 6), kept(extension, 3))
+}
+
+/// The first two characters of the short base of each protected name: the
+/// [`PROTECTED_NAMES`], the [`PROTECTED_PREFIX`] and the [`CONFIG_DIR`].
+/// The folders inside `.config` are left out: a path to one goes through
+/// `.config`, and `gh` and `gcloud` are short names already, so Windows
+/// makes no other.
+fn protected_short_starts() -> Vec<String> {
+    PROTECTED_NAMES
+        .iter()
+        .chain([&PROTECTED_PREFIX, &CONFIG_DIR])
+        .map(|name| short_form(name).0.chars().take(2).collect::<String>())
+        .filter(|start| !start.is_empty())
+        .collect()
+}
+
+/// The extensions a short name of a protected file can have: those of the
+/// [`PROTECTED_NAMES`] that have one (`.mcp.json`), and the
+/// [`PROTECTED_EXTENSIONS`], each cut to 3 characters.
+fn protected_short_extensions() -> Vec<String> {
+    let of_names = PROTECTED_NAMES.iter().map(|name| short_form(name).1);
+    let extensions = PROTECTED_EXTENSIONS.iter().map(|extension| extension.trim_start_matches('.').chars().take(3).collect());
+    of_names.chain(extensions).filter(|extension| !extension.is_empty()).collect()
 }
 
 /// The name that a part of a path opens. On Windows that is the part without
@@ -1745,7 +1818,13 @@ fn opened_name(part: &str, platform: Platform) -> &str {
 /// `CLAUDE~1` or `SETTIN~1.JSO`. A `~` before anything else, as in `~/x`, is
 /// not one.
 fn has_short_name(text: &str) -> bool {
-    text.as_bytes().windows(2).any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+    short_name_tilde(text).is_some()
+}
+
+/// Where the `~` of the first short (8.3) name in `text` is: the first `~`
+/// followed by a digit.
+fn short_name_tilde(text: &str) -> Option<usize> {
+    text.as_bytes().windows(2).position(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
 }
 
 /// `text`, which is lowercase, without the worktree's own path. That path is
@@ -1788,8 +1867,24 @@ fn without_whole_path(text: &str, path: &str) -> String {
 /// Whether a request touches a protected path, in its summary or in a path
 /// field of its input. Such a request is never allowed by a rule.
 fn request_is_protected(summary: &str, input: &Value, worktree: &Path, platform: Platform) -> bool {
+    request_texts(summary, input).any(|text| touches_protected_path(text, worktree, platform))
+}
+
+/// Whether, on Windows, a request holds a short (8.3) name outside the
+/// worktree's own path, in its summary or in a path field of its input.
+/// One that is not a protected name can still name another file than its
+/// text says, so such a request gets no rule either.
+fn request_has_short_name(summary: &str, input: &Value, worktree: &Path, platform: Platform) -> bool {
+    platform == Platform::Windows
+        && request_texts(summary, input).any(|text| {
+            spellings(&without_worktree(&text.to_lowercase(), worktree), platform).iter().any(|text| has_short_name(text))
+        })
+}
+
+/// A request's summary and the path fields of its input.
+fn request_texts<'a>(summary: &'a str, input: &'a Value) -> impl Iterator<Item = &'a str> {
     let paths = PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str));
-    std::iter::once(summary).chain(paths).any(|text| touches_protected_path(text, worktree, platform))
+    std::iter::once(summary).chain(paths)
 }
 
 #[cfg(test)]
@@ -2981,21 +3076,23 @@ mod tests {
             assert!(!protected(summary, Platform::Unix), "{summary:?}");
         }
         // The worktree's own path is the daemon's: a short name in it is not
-        // the agent's. Below it, beside it and elsewhere one is.
-        let short = Path::new("/Users/RUNNER~1/repo/.worktrees/fix");
+        // the agent's, even one that could stand for a protected name, as the
+        // user folder `CLAUDE~1` of a long user name can. Below it, beside it
+        // and elsewhere one is.
+        let short = Path::new("/Users/CLAUDE~1/repo/.worktrees/fix");
         let in_short = |summary: &str| touches_protected_path(summary, short, Platform::Windows);
-        assert!(!in_short("/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs"));
-        assert!(!in_short("/Users/RUNNER~1/repo/.worktrees/fix"));
-        assert!(!in_short(r"cat \Users\runner~1\repo\.worktrees\fix\src\a.rs"));
-        assert!(!in_short("cat \"/users/runner~1/repo/.worktrees/fix/src/a.rs\" README.md"));
-        assert!(in_short("/Users/RUNNER~1/repo/.worktrees/fix/CLAUDE~1/x"));
-        assert!(in_short("/Users/RUNNER~1/repo/.worktrees/fix2/src/a.rs"));
-        assert!(in_short("/Users/RUNNER~1/repo/src/a.rs"));
-        let drive = Path::new(r"C:\Users\RUNNER~1\repo\.worktrees\fix");
-        assert!(!touches_protected_path(r"C:\Users\RUNNER~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
-        assert!(!touches_protected_path("C:/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs", drive, Platform::Windows));
-        assert!(!touches_protected_path(r"\\?\C:\Users\RUNNER~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
-        assert!(touches_protected_path(r"C:\Users\RUNNER~1\repo\.worktrees\fix\.claude.\x", drive, Platform::Windows));
+        assert!(!in_short("/Users/CLAUDE~1/repo/.worktrees/fix/src/a.rs"));
+        assert!(!in_short("/Users/CLAUDE~1/repo/.worktrees/fix"));
+        assert!(!in_short(r"cat \Users\claude~1\repo\.worktrees\fix\src\a.rs"));
+        assert!(!in_short("cat \"/users/claude~1/repo/.worktrees/fix/src/a.rs\" README.md"));
+        assert!(in_short("/Users/CLAUDE~1/repo/.worktrees/fix/CLAUDE~1/x"));
+        assert!(in_short("/Users/CLAUDE~1/repo/.worktrees/fix2/src/a.rs"));
+        assert!(in_short("/Users/CLAUDE~1/repo/src/a.rs"));
+        let drive = Path::new(r"C:\Users\CLAUDE~1\repo\.worktrees\fix");
+        assert!(!touches_protected_path(r"C:\Users\CLAUDE~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
+        assert!(!touches_protected_path("C:/Users/CLAUDE~1/repo/.worktrees/fix/src/a.rs", drive, Platform::Windows));
+        assert!(!touches_protected_path(r"\\?\C:\Users\CLAUDE~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
+        assert!(touches_protected_path(r"C:\Users\CLAUDE~1\repo\.worktrees\fix\.claude.\x", drive, Platform::Windows));
 
         // These requests are protected, so Always allow says so, and the rest
         // keep the reason they had.
@@ -3011,6 +3108,94 @@ mod tests {
         assert_eq!(command("cat CLAUDE~1/settings.local.json"), Err(OnceOnly::Protected));
         assert_eq!(command("cat ~/.zshrc"), Err(OnceOnly::WindowsPath));
         assert_eq!(command("cp README.md D:notes"), Err(OnceOnly::WindowsPath));
+    }
+
+    /// On Windows a short (8.3) name is a protected path only when it can
+    /// stand for a protected name. Any other one, such as a git revision, is
+    /// not, but still asks each time and gets no rule. Unix has no short names.
+    #[test]
+    fn windows_short_names_are_protected_only_when_they_can_be_protected_names() {
+        let worktree = Path::new("/repo/.worktrees/fix");
+        let protected = |summary: &str, platform| touches_protected_path(summary, worktree, platform);
+        let rule = |command: &str, platform| rule_for_on("Bash", command, &json!({ "command": command }), worktree, platform);
+        for name in [
+            // `.claude`, also with the hash Windows uses once four names share a start.
+            "CLAUDE~1",
+            "CL3F2A~1",
+            "claude~12",
+            // `.claude/settings.json`, `.mcp.json`, `.env`, `.env.local`, `.ssh`, `.config`.
+            "SETTIN~1.JSO",
+            "MCP~1.JSO",
+            "ENV~1",
+            "ENV~1.LOC",
+            "SSH~1",
+            "CONFIG~1",
+            "GIT-CR~1",
+            "DOCKER~1",
+        ] {
+            for summary in [
+                format!("type {name}"),
+                format!(r"C:\Users\x\{name}\x"),
+                format!("/repo/.worktrees/fix/{name}/x"),
+                format!("cat {name}."),
+                format!("--file={name}"),
+            ] {
+                assert!(protected(&summary, Platform::Windows), "{summary:?}");
+                assert!(!protected(&summary, Platform::Unix), "{summary:?}");
+                assert_eq!(rule(&summary, Platform::Windows), Err(OnceOnly::Protected), "{summary:?}");
+            }
+        }
+        // A `.pem` or `.key` file is protected by its name everywhere.
+        for summary in ["type SERVER~1.PEM", r"type C:\x\PRIVAT~1.KEY"] {
+            assert!(protected(summary, Platform::Windows) && protected(summary, Platform::Unix), "{summary:?}");
+        }
+        for command in [
+            "git diff HEAD~1",
+            "git rebase -i @~2",
+            "git log main~3",
+            "git diff origin/main~1",
+            "git show HEAD~1:src/a.rs",
+            "git diff HEAD~1..HEAD",
+            "git log a1b2c3d~2 --oneline",
+            "git checkout -b fix HEAD~10",
+            // Short names that no protected name has.
+            "type RUNNER~1",
+            r"type C:\Users\RUNNER~1\notes.txt",
+            "type PROGRA~1",
+            "type NOTES~1.TXT",
+        ] {
+            for platform in [Platform::Unix, Platform::Windows] {
+                assert!(!protected(command, platform), "{command:?} {platform:?}");
+            }
+            assert_eq!(rule(command, Platform::Windows), Err(OnceOnly::WindowsPath), "{command:?}");
+        }
+        // A protected name next to a revision still counts.
+        assert_eq!(rule("git diff HEAD~1 -- .env", Platform::Windows), Err(OnceOnly::Protected));
+        // A short name in a URL gets no rule on Windows either. Unix keeps its rule.
+        let url = "https://example.com/docs/HEAD~1";
+        let fetch = |platform| rule_for_on("WebFetch", url, &json!({ "url": url }), worktree, platform);
+        assert_eq!(fetch(Platform::Windows), Err(OnceOnly::WindowsPath));
+        assert_eq!(fetch(Platform::Unix), Ok(AllowRule { tool: "WebFetch".into(), prefix: Some("https://example.com".into()) }));
+        // The worktree's own short name is the daemon's.
+        let short = Path::new("/Users/RUNNER~1/repo/.worktrees/fix");
+        let path = "/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs";
+        let input = json!({ "file_path": path, "content": "x" });
+        assert_eq!(rule_for_on("Write", path, &input, short, Platform::Windows), Ok(AllowRule { tool: "Write".into(), prefix: None }));
+    }
+
+    /// The short forms that count come from the protected names, made the
+    /// way Windows makes them.
+    #[test]
+    fn short_forms_of_protected_names_come_from_the_names() {
+        let form = |base: &str, extension: &str| (base.to_string(), extension.to_string());
+        assert_eq!(short_form(".claude"), form("claude", ""));
+        assert_eq!(short_form(".mcp.json"), form("mcp", "jso"));
+        assert_eq!(short_form(".git-credentials"), form("git-cr", ""));
+        assert_eq!(short_form(".env"), form("env", ""));
+        assert_eq!(short_form("settings.local.json"), form("settin", "jso"));
+        assert_eq!(short_form("my file.tar.gz"), form("myfile", "gz"));
+        assert_eq!(protected_short_starts(), ["ss", "aw", "gn", "ku", "do", "ne", "gi", "np", "py", "cl", "mc", "en", "co"]);
+        assert_eq!(protected_short_extensions(), ["jso", "pem", "key"]);
     }
 
     /// The check reads text only, so the Windows rules run on every platform.
