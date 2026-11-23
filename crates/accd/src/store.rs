@@ -213,7 +213,7 @@ mod tests {
     fn session(id: &str, status: SessionStatus) -> Session {
         Session {
             id: id.into(), project_id: "p1".into(), agent: "claude".into(), title: "t".into(), branch: "agent/x".into(),
-            worktree: "/w".into(), mode: SessionMode::Worktree, stay_on_base: false, status, status_since: 10, started_at: 5,
+            worktree: "/w".into(), mode: SessionMode::Worktree, stay_on_base: false, usage: None, status, status_since: 10, started_at: 5,
             ended_at: None, exit_code: None,
             history: vec![StatusChange { status: SessionStatus::Starting, at: 5 }],
         }

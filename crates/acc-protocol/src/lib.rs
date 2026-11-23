@@ -52,12 +52,48 @@ pub struct Session {
     /// so it is not asked to make a branch again.
     #[serde(default)]
     pub stay_on_base: bool,
+    /// What Claude Code last reported to its status line. `None` until then.
+    #[serde(default)]
+    pub usage: Option<SessionUsage>,
     pub status: SessionStatus,
     pub status_since: i64,
     pub started_at: i64,
     pub ended_at: Option<i64>,
     pub exit_code: Option<i32>,
     pub history: Vec<StatusChange>,
+}
+
+/// A session's use as Claude Code reports it to its status line.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct SessionUsage {
+    /// What the session's use would cost on the API, in US dollars. On a
+    /// Claude plan it is an estimate, not a charge.
+    pub cost_usd: f64,
+    /// How full the context window is, 0 to 100.
+    pub context_used_percentage: Option<f64>,
+    pub context_window_size: Option<u64>,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub updated_at: i64,
+}
+
+/// One limit window of the Claude plan.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlanLimit {
+    /// 0 to 100.
+    pub used_percentage: f64,
+    /// When the window resets, in seconds since 1970. `None` when not given.
+    pub resets_at: Option<i64>,
+}
+
+/// The Claude plan's limits, the same for every session of the account.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct PlanUsage {
+    pub five_hour: Option<PlanLimit>,
+    pub seven_day: Option<PlanLimit>,
+    pub updated_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -172,6 +208,7 @@ pub enum DaemonEvent {
     ApprovalResolved(Approval),
     ProjectAdded(Project),
     EventAppended(EventRecord),
+    PlanUsageUpdated(PlanUsage),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -188,6 +225,9 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
     pub approvals: Vec<Approval>,
+    /// `None` until a session has reported the plan's limits.
+    #[serde(default)]
+    pub plan_usage: Option<PlanUsage>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

@@ -1,4 +1,4 @@
-use acc_protocol::{SessionMode, SessionStatus};
+use acc_protocol::{PlanLimit, PlanUsage, SessionMode, SessionStatus, SessionUsage};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -196,8 +196,13 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
         }
         hooks.insert(ev.to_string(), json!([{ "hooks": [entry] }]));
     }
+    // The status line reports the session's cost, context and the plan's
+    // limits on each update. acc-hook passes them to the daemon and prints
+    // the line it gets back.
+    let mut status_line = hook_command(hook_bin);
+    status_line["refreshInterval"] = json!(STATUS_REFRESH_SECS);
     let path = settings_path(dir);
-    std::fs::write(&path, serde_json::to_vec_pretty(&json!({ "hooks": hooks }))?)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&json!({ "hooks": hooks, "statusLine": status_line }))?)?;
     Ok(path)
 }
 
@@ -213,6 +218,59 @@ fn setting_sources(mode: SessionMode) -> Vec<String> {
         SessionMode::Project => vec!["--setting-sources".into(), PROJECT_SETTING_SOURCES.into()],
         SessionMode::Worktree => Vec::new(),
     }
+}
+
+/// How often Claude Code runs the status line while nothing else updates it.
+const STATUS_REFRESH_SECS: u64 = 30;
+
+/// Whether a payload is Claude Code's status line input rather than a hook
+/// event: it names no hook event, or `Status`, and has the session's model
+/// and workspace.
+fn is_status_line(payload: &Value) -> bool {
+    let event = payload.get("hook_event_name").and_then(Value::as_str);
+    matches!(event, None | Some("Status")) && payload.get("model").is_some() && payload.get("workspace").is_some()
+}
+
+/// The session's use, and the plan's limits when the payload has them.
+pub fn parse_status(payload: &Value, now: i64) -> (SessionUsage, Option<PlanUsage>) {
+    let num = |v: &Value, path: &[&str]| path.iter().try_fold(v, |v, key| v.get(key)).and_then(Value::as_f64);
+    let text = |path: &[&str]| path.iter().try_fold(payload, |v, key| v.get(key)).and_then(Value::as_str).map(str::to_string);
+    let usage = SessionUsage {
+        cost_usd: num(payload, &["cost", "total_cost_usd"]).unwrap_or(0.0),
+        context_used_percentage: num(payload, &["context_window", "used_percentage"]),
+        context_window_size: num(payload, &["context_window", "context_window_size"]).map(|n| n as u64),
+        lines_added: num(payload, &["cost", "total_lines_added"]).unwrap_or(0.0) as u64,
+        lines_removed: num(payload, &["cost", "total_lines_removed"]).unwrap_or(0.0) as u64,
+        model: text(&["model", "display_name"]).or_else(|| text(&["model", "id"])),
+        effort: text(&["effort", "level"]),
+        updated_at: now,
+    };
+    let limit = |name: &str| {
+        let window = payload.get("rate_limits")?.get(name)?;
+        Some(PlanLimit {
+            used_percentage: window.get("used_percentage")?.as_f64()?,
+            resets_at: window.get("resets_at").and_then(Value::as_i64),
+        })
+    };
+    let (five_hour, seven_day) = (limit("five_hour"), limit("seven_day"));
+    let plan = (five_hour.is_some() || seven_day.is_some()).then_some(PlanUsage { five_hour, seven_day, updated_at: now });
+    (usage, plan)
+}
+
+/// The line shown at the bottom of the session's terminal.
+pub fn status_text(usage: &SessionUsage, plan: Option<&PlanUsage>) -> String {
+    let mut parts = Vec::new();
+    if let Some(model) = &usage.model {
+        parts.push(model.clone());
+    }
+    if let Some(used) = usage.context_used_percentage {
+        parts.push(format!("context {used:.0}%"));
+    }
+    parts.push(format!("${:.2}", usage.cost_usd));
+    if let Some(window) = plan.and_then(|p| p.five_hour.as_ref()) {
+        parts.push(format!("5h {:.0}%", window.used_percentage));
+    }
+    parts.join(" · ")
 }
 
 pub fn launch_args(settings: &Path, session_id: &str, task: &str, mode: SessionMode) -> Vec<String> {
@@ -231,6 +289,8 @@ pub fn resume_args(settings: &Path, session_id: &str, mode: SessionMode) -> Vec<
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookEffect {
     Status(SessionStatus),
+    /// Claude Code's status line input: the session's use and the plan's limits.
+    StatusLine,
     /// A tool is about to run: the session is Working, and the daemon checks
     /// the call (the branch question, secret reads in the project folder).
     PreTool { tool: String, summary: String, input: Value },
@@ -240,6 +300,9 @@ pub enum HookEffect {
 }
 
 pub fn interpret_hook(payload: &Value) -> HookEffect {
+    if is_status_line(payload) {
+        return HookEffect::StatusLine;
+    }
     let Some(event) = payload.get("hook_event_name").and_then(Value::as_str) else {
         return HookEffect::Nothing;
     };
@@ -289,6 +352,55 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+
+    fn status_payload() -> Value {
+        json!({
+            "session_id": "s1",
+            "model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
+            "workspace": {"current_dir": "/r"},
+            "cost": {"total_cost_usd": 2.345, "total_lines_added": 120, "total_lines_removed": 30},
+            "context_window": {"used_percentage": 64.4, "context_window_size": 200000},
+            "effort": {"level": "high"},
+            "rate_limits": {"five_hour": {"used_percentage": 68.0, "resets_at": 1795480000}, "seven_day": {"used_percentage": 31.5}}
+        })
+    }
+
+    #[test]
+    fn status_line_input_is_told_apart_from_hook_events() {
+        assert_eq!(interpret_hook(&status_payload()), HookEffect::StatusLine);
+        let mut named = status_payload();
+        named["hook_event_name"] = json!("Status");
+        assert_eq!(interpret_hook(&named), HookEffect::StatusLine);
+        assert_eq!(interpret_hook(&json!({"hook_event_name": "Stop", "model": {}, "workspace": {}})), HookEffect::Status(SessionStatus::Idle));
+    }
+
+    #[test]
+    fn status_reports_usage_and_plan_limits() {
+        let (usage, plan) = parse_status(&status_payload(), 7);
+        assert_eq!(usage.cost_usd, 2.345);
+        assert_eq!((usage.context_used_percentage, usage.context_window_size), (Some(64.4), Some(200000)));
+        assert_eq!((usage.lines_added, usage.lines_removed), (120, 30));
+        assert_eq!((usage.model.as_deref(), usage.effort.as_deref(), usage.updated_at), (Some("Opus 5.5"), Some("high"), 7));
+        let plan = plan.unwrap();
+        assert_eq!(plan.five_hour, Some(PlanLimit { used_percentage: 68.0, resets_at: Some(1795480000) }));
+        assert_eq!(plan.seven_day, Some(PlanLimit { used_percentage: 31.5, resets_at: None }));
+        assert_eq!(status_text(&usage, Some(&plan)), "Opus 5.5 · context 64% · $2.35 · 5h 68%");
+
+        // An API key or a third-party provider has no plan limits.
+        let (usage, plan) = parse_status(&json!({"model": {"id": "x"}, "workspace": {}}), 1);
+        assert_eq!(plan, None);
+        assert_eq!(status_text(&usage, None), "x · $0.00");
+    }
+
+    #[test]
+    fn settings_give_the_status_line_to_the_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_settings(dir.path(), Path::new("/bin/acc-hook")).unwrap();
+        let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["refreshInterval"], 30);
+        assert_eq!(v["statusLine"]["command"], v["hooks"]["Stop"][0]["hooks"][0]["command"]);
+    }
 
     #[test]
     fn launch_args_order() {

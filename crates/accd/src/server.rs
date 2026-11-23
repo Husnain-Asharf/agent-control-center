@@ -349,6 +349,10 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
             shared.state.lock().await.tool_used(session_id, tool, &summary);
             return Some(silent);
         }
+        HookEffect::StatusLine => {
+            let text = shared.state.lock().await.status_reported(session_id, payload);
+            return Some(HookReply { stdout: Some(text), exit_code: 0 });
+        }
         HookEffect::PreTool { tool, summary, input } => {
             let outcome = {
                 let mut state = shared.state.lock().await;

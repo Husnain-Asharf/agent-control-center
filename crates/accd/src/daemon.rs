@@ -13,8 +13,8 @@ use crate::session_path;
 use crate::store::{AllowRule, NewEvent, Store};
 use crate::worktree::{self, Head, RepoInfo, WorktreeError};
 use acc_protocol::{
-    Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, Project, Session, SessionMode, SessionStatus,
-    Snapshot, StatusChange,
+    Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, PlanUsage, Project, Session, SessionMode,
+    SessionStatus, SessionUsage, Snapshot, StatusChange,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -438,6 +438,7 @@ impl Shared {
             worktree: worktree.to_string_lossy().into_owned(),
             mode,
             stay_on_base: false,
+            usage: None,
             status: SessionStatus::Starting,
             status_since: now,
             started_at: now,
@@ -661,6 +662,8 @@ pub(crate) struct Daemon {
     resolved: HashSet<String>,
     /// Set by shutdown: agent exits are no longer recorded.
     shutting_down: bool,
+    /// The plan's limits as the last status line reported them.
+    plan_usage: Option<PlanUsage>,
 }
 
 impl Daemon {
@@ -683,6 +686,7 @@ impl Daemon {
             pending: HashMap::new(),
             resolved: HashSet::new(),
             shutting_down: false,
+            plan_usage: None,
         };
         for s in &orphans {
             daemon.session_event(s, "session.status", "system", json!({ "status": s.status }));
@@ -747,7 +751,7 @@ impl Daemon {
         sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at).then_with(|| a.id.cmp(&b.id)));
         let mut approvals: Vec<Approval> = self.pending.values().map(|p| p.approval.clone()).collect();
         approvals.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
-        Snapshot { projects: self.projects.clone(), sessions, approvals }
+        Snapshot { projects: self.projects.clone(), sessions, approvals, plan_usage: self.plan_usage.clone() }
     }
 
     pub(crate) fn project(&self, id: &str) -> Option<Project> {
@@ -1002,6 +1006,30 @@ impl Daemon {
         self.pending.insert(id.clone(), PendingApproval { approval, project_id, rule, reply });
         self.set_status(session_id, SessionStatus::NeedsYou, "agent");
         ApprovalOutcome::Pending { id, decision }
+    }
+
+    /// Keeps what a session's status line reported, and returns the line to
+    /// show. A session is saved and sent only when a number changed, not for
+    /// each refresh.
+    pub(crate) fn status_reported(&mut self, session_id: &str, payload: &Value) -> String {
+        let (usage, plan) = claude::parse_status(payload, now_ms());
+        if let Some(plan) = plan {
+            let changed = self.plan_usage.as_ref().is_none_or(|old| !same_plan(old, &plan));
+            self.plan_usage = Some(plan.clone());
+            if changed {
+                self.emit(DaemonEvent::PlanUsageUpdated(plan));
+            }
+        }
+        let text = claude::status_text(&usage, self.plan_usage.as_ref());
+        if let Some(entry) = self.sessions.get_mut(session_id) {
+            let changed = entry.session.usage.as_ref().is_none_or(|old| !same_usage(old, &usage));
+            entry.session.usage = Some(usage);
+            if changed {
+                let session = entry.session.clone();
+                self.publish(&session);
+            }
+        }
+        text
     }
 
     fn set_hook_dirs(&mut self, session_id: &str, dirs: Vec<PathBuf>) {
@@ -1340,6 +1368,14 @@ fn touches_dirs(summary: &str, input: &Value, dirs: &[PathBuf], folder: &Path) -
         let relative = dir.strip_prefix(folder).ok().map(|r| r.to_string_lossy().to_lowercase().replace('\\', "/"));
         in_field || lower.contains(&full) || relative.is_some_and(|r| !r.is_empty() && lower.contains(&r))
     })
+}
+
+fn same_usage(a: &SessionUsage, b: &SessionUsage) -> bool {
+    SessionUsage { updated_at: 0, ..a.clone() } == SessionUsage { updated_at: 0, ..b.clone() }
+}
+
+fn same_plan(a: &PlanUsage, b: &PlanUsage) -> bool {
+    PlanUsage { updated_at: 0, ..a.clone() } == PlanUsage { updated_at: 0, ..b.clone() }
 }
 
 fn is_finished(status: &SessionStatus) -> bool {

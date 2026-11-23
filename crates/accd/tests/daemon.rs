@@ -2057,3 +2057,34 @@ async fn restart_in_a_folder_that_is_gone_says_so() {
     assert!(message.contains("is gone"), "{message}");
     stop(server).await;
 }
+
+#[tokio::test]
+async fn the_status_line_reports_usage_and_plan_limits() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Look around").await;
+    let payload = json!({
+        "model": {"display_name": "Opus 5.5"},
+        "workspace": {"current_dir": s.worktree},
+        "cost": {"total_cost_usd": 1.5, "total_lines_added": 3, "total_lines_removed": 1},
+        "context_window": {"used_percentage": 40.0, "context_window_size": 200000},
+        "rate_limits": {"five_hour": {"used_percentage": 12.0, "resets_at": 1795480000}}
+    });
+
+    let mut hk = hook(&h.socket(), &s.id, payload.clone()).await;
+    assert_eq!(hook_reply(&mut hk).await.stdout.as_deref(), Some("Opus 5.5 · context 40% · $1.50 · 5h 12%"));
+    let plan = app.event(|e| matches!(e, DaemonEvent::PlanUsageUpdated(_)));
+    match plan.await {
+        DaemonEvent::PlanUsageUpdated(p) => assert_eq!(p.five_hour.map(|w| w.used_percentage), Some(12.0)),
+        _ => unreachable!(),
+    }
+    let updated = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == s.id && u.usage.is_some()));
+    match updated.await {
+        DaemonEvent::SessionUpdated(u) => assert_eq!(u.usage.map(|u| u.cost_usd), Some(1.5)),
+        _ => unreachable!(),
+    }
+    let snap: Snapshot = from(app.call(Request::Snapshot).await);
+    assert_eq!(snap.plan_usage.and_then(|p| p.five_hour).map(|w| w.used_percentage), Some(12.0));
+    stop(server).await;
+}

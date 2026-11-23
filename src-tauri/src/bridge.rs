@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(app.notice().await, connected());
         let snapshot = app.bridge.request("snapshot", None).await.unwrap();
         let snapshot: Snapshot = serde_json::from_value(snapshot).unwrap();
-        assert_eq!(snapshot, Snapshot { projects: vec![], sessions: vec![], approvals: vec![] });
+        assert_eq!(snapshot, Snapshot { projects: vec![], sessions: vec![], approvals: vec![], plan_usage: None });
 
         drop(app);
         assert!(acc_transport::connect(&socket_path(dir.path())).await.is_ok(), "accd keeps running without the app");
