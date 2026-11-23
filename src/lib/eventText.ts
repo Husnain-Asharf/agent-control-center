@@ -33,6 +33,10 @@ function decidedText(p: Record<string, unknown>, actor: string): string {
     }
     case 'deny':
       return `Denied: ${line}`;
+    case 'make_branch':
+      return `Made a branch first: ${line}`;
+    case 'stay_on_base':
+      return `Allowed on the base branch: ${line}`;
     default:
       return `Decided: ${line}`;
   }
@@ -60,11 +64,15 @@ export function eventText(ev: Pick<EventRecord, 'kind' | 'actor' | 'payload'>): 
         ? `Exited with code ${p.exit_code}`
         : `Ended without an exit code (${statusLabel(p.status)})`;
     case 'approval.requested':
-      return `Asked to use ${toolLine(p)}`;
+      return p.kind === 'branch' ? `Asked whether to branch before ${toolLine(p)}` : `Asked to use ${toolLine(p)}`;
+    case 'branch.made':
+      return `Made branch ${str(p.branch) ?? ''}`.trim();
     case 'approval.decided':
       return decidedText(p, ev.actor);
     case 'approval.cancelled':
-      return `Request cancelled: ${toolLine(p)}`;
+      return p.reason === 'branch made'
+        ? `Settled by branch ${str(p.branch) ?? ''}: ${toolLine(p)}`
+        : `Request cancelled: ${toolLine(p)}`;
     case 'approval.expired':
       return `Request expired: ${toolLine(p)}`;
     case 'tool.used':

@@ -45,11 +45,38 @@ export const termFontWeight = (bolder: boolean): number => (bolder ? 500 : 400);
  * Zooms the app's webview. Page zoom keeps mouse selection in the terminal working, which
  * CSS zoom does not. Does nothing outside the app, such as in tests or a plain browser.
  */
+/** The narrowest page, in CSS pixels, that the layout is made for. */
+const MIN_LAYOUT_WIDTH = 1024;
+let wanted = 1;
+let applied = 1;
+let watching = false;
+
+/**
+ * The zoom to use for `scale` in a window `width` pixels wide at zoom 1. Zooming in stops
+ * where the page would get narrower than `MIN_LAYOUT_WIDTH`, but never below 100%.
+ * Zooming out is always fine.
+ */
+export function fittedScale(scale: number, width: number): number {
+  if (scale <= 1) return scale;
+  return Math.max(1, Math.min(scale, width / MIN_LAYOUT_WIDTH));
+}
+
 export function applyTextScale(scale: number): void {
   if (!isTauri()) return;
+  wanted = scale;
+  if (!watching && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    watching = true;
+    window.addEventListener('resize', () => applyTextScale(wanted));
+  }
+  // Without a known width (tests) there is nothing to fit to.
+  const inner = typeof window !== 'undefined' ? window.innerWidth : undefined;
+  const width = typeof inner === 'number' && inner > 0 ? inner * applied : Number.POSITIVE_INFINITY;
+  const scaleNow = fittedScale(scale, width);
+  if (scaleNow === applied && scale !== 1) return;
+  applied = scaleNow;
   try {
     getCurrentWebview()
-      .setZoom(scale)
+      .setZoom(scaleNow)
       .catch(() => {});
   } catch {
     // no webview to zoom

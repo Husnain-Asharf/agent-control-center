@@ -20,7 +20,7 @@ import { Sessions } from './screens/Sessions';
 import { Approvals } from './screens/Approvals';
 import { Settings } from './screens/Settings';
 import { DEFAULT_TEXT_SCALE, stepTextScale } from './lib/appearance';
-import { decide, isProtectedApproval, jumpToOldest, wantsVerb } from './lib/approvals';
+import { decide, isBranchQuestion, isProtectedApproval, jumpToOldest, wantsVerb } from './lib/approvals';
 import { go, useRoute } from './lib/route';
 import { NewSessionDialog, onOpenNewSession, openNewSession } from './dialogs/NewSessionDialog';
 import { createReplayQueue } from './lib/snapshotQueue';
@@ -134,7 +134,7 @@ export default function App() {
           msg: `${title} wants to ${wantsVerb(a.tool)} ${a.summary}`,
           kind: 'needs',
           actions: [
-            ...(isProtectedApproval(a) ? [] : [{ label: 'Allow once', run: () => void decide(a.id, 'allow_once') }]),
+            ...(isProtectedApproval(a) || isBranchQuestion(a) ? [] : [{ label: 'Allow once', run: () => void decide(a.id, 'allow_once') }]),
             { label: 'Open', run: () => go(`#approvals/${a.id}`) },
           ],
         });
@@ -178,6 +178,7 @@ export default function App() {
         <TitleBar />
         <Sidebar />
         <main className="main" id="main" tabIndex={-1}>
+          <OfflineBanner />
           <Screen />
         </main>
         <StatusBar />
@@ -194,5 +195,20 @@ export default function App() {
       )}
       {addProjectOpen && <AddProjectDialog onClose={() => setAddProjectOpen(false)} />}
     </>
+  );
+}
+
+/** Says plainly when the daemon is not connected, so the screens are read as last known. */
+function OfflineBanner() {
+  const connected = useStore((s) => s.connected);
+  const error = useStore((s) => s.daemonError);
+  const epoch = useStore((s) => s.connEpoch);
+  // Before the first connection the status bar says "Connecting", which is enough.
+  if (connected || epoch === 0) return null;
+  return (
+    <p className="offline-banner" role="status">
+      The daemon is not connected{error ? `: ${error}` : ''}. Sessions keep running, and the app reconnects by itself. What
+      you see here is the last known state.
+    </p>
   );
 }

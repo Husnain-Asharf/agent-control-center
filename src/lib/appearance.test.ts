@@ -2,20 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import appCss from '../styles/app.css?raw';
 import tokens from '../styles/tokens.css?raw';
 import indexHtml from '../../index.html?raw';
-import {
-  DEFAULT_TERM_FONT_SIZE,
-  DEFAULT_TEXT_SCALE,
-  TEXT_SCALES,
-  applyTextScale,
-  parseBolder,
-  parseTermFontSize,
-  parseTextScale,
-  scaleLabel,
-  setBolderAttr,
-  stepTextScale,
-  termFontWeight,
-  type TextScale,
-} from './appearance';
+import { DEFAULT_TERM_FONT_SIZE, DEFAULT_TEXT_SCALE, TEXT_SCALES, applyTextScale, fittedScale, parseBolder, parseTermFontSize, parseTextScale, scaleLabel, setBolderAttr, stepTextScale, termFontWeight, type TextScale } from './appearance';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -75,6 +62,13 @@ describe('applyTextScale', () => {
     vi.stubGlobal('window', { __TAURI_INTERNALS__: { invoke, metadata } });
     applyTextScale(1.25);
     expect(invoke).toHaveBeenCalledWith('plugin:webview|set_webview_zoom', { label: 'main', value: 1.25 }, undefined);
+  });
+  it('caps the zoom so the page stays at least 1024 pixels wide', () => {
+    expect(fittedScale(1.4, 1440)).toBe(1.4);
+    expect(fittedScale(1.4, 1200)).toBeCloseTo(1200 / 1024);
+    expect(fittedScale(1.25, 1024)).toBe(1);
+    expect(fittedScale(0.9, 1024)).toBe(0.9);
+    expect(fittedScale(1.1, Number.POSITIVE_INFINITY)).toBe(1.1);
   });
   it('survives a refused zoom', async () => {
     vi.stubGlobal('isTauri', true);

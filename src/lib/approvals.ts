@@ -125,9 +125,15 @@ export async function decide(approvalId: string, decision: Decision): Promise<vo
 }
 
 /** Opens the oldest pending approval. Does nothing when none is waiting. */
+/** Opens the oldest pending approval, or else the session that failed first. */
 export function jumpToOldest(): void {
-  const a = oldestPending(useStore.getState());
-  if (a) go(`#approvals/${a.id}`);
+  const st = useStore.getState();
+  const a = oldestPending(st);
+  if (a) return go(`#approvals/${a.id}`);
+  const failed = Object.values(st.sessions)
+    .filter((s) => s.status === 'failed')
+    .sort((x, y) => x.status_since - y.status_since)[0];
+  if (failed) go(`#session/${failed.id}`);
 }
 
 /** Current time, refreshed every second while mounted. */

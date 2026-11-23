@@ -46,7 +46,7 @@ export function AddProjectDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Dialog title="Add a project" onClose={onClose} onSubmit={submit} wide>
-      <p className="muted">Any git repository works. Each session in it gets its own worktree and branch.</p>
+      <p className="muted">Any git repository works. Sessions work in its folder and ask before they change the base branch, or get their own worktree and branch if you choose.</p>
       <div className="field">
         <span>Folder</span>
         <div style={{ display: 'flex', gap: 8 }}>

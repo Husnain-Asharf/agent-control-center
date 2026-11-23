@@ -17,7 +17,8 @@ export function Projects() {
   const approvals = useStore((s) => s.approvals);
   const groups = useMemo(() => sessionsByProject({ projects, sessions }), [projects, sessions]);
   const [adding, setAdding] = useState(false);
-  const live = Object.values(sessions).filter((s) => s.status !== 'stopped').length;
+  const LIVE = ['starting', 'working', 'needs_you', 'idle'];
+  const live = Object.values(sessions).filter((s) => LIVE.includes(s.status)).length;
 
   return (
     <div className="screen">
@@ -26,7 +27,7 @@ export function Projects() {
           <h1>Projects</h1>
           <p>
             {plural(groups.length, 'repository', 'repositories')} with {plural(live, 'live session', 'live sessions')}.
-            Each session works in its own worktree.
+            Sessions work in the project folder and ask before they change the base branch.
           </p>
         </div>
         <button className="btn btn--primary" type="button" onClick={() => setAdding(true)}>
@@ -96,7 +97,7 @@ export function ProjectPage() {
         </nav>
         <div className="empty">
           <h1>Project not found</h1>
-          <p>It may have been removed. Go back to Projects.</p>
+          <p>This project is not in the app. Go back to Projects.</p>
         </div>
       </div>
     );

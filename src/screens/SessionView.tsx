@@ -60,7 +60,7 @@ export function SessionView() {
         </nav>
         <div className="empty">
           <h1>Session not found</h1>
-          <p>It may have been removed. Go back to Sessions.</p>
+          <p>This session is not in the app. Go back to Sessions.</p>
         </div>
       </div>
     );
@@ -119,6 +119,12 @@ export function SessionView() {
               <code>{folder}</code>
             </dd>
           </div>
+          {session.mode === 'project' && session.stay_on_base && (
+            <div>
+              <dt>Base branch</dt>
+              <dd title="You chose Allow on the base branch, so this session is not asked again">Changes allowed</dd>
+            </div>
+          )}
           {session.usage && (
             <>
               <div>
@@ -151,7 +157,7 @@ export function SessionView() {
             </>
           )}
           <div>
-            <dt>Running</dt>
+            <dt>{running ? 'Running' : 'Ran for'}</dt>
             <dd>{fmtTimer(elapsed)}</dd>
           </div>
         </dl>
