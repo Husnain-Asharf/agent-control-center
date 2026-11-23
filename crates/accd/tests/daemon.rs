@@ -1560,7 +1560,8 @@ async fn sessions_get_the_install_folders_when_the_login_shell_fails() {
 
 /// On Windows a short (8.3) name, a name ending in a dot, a data stream, a
 /// device or a drive can name another file than the rules see, so such a
-/// request always asks, also under a rule that covers its neighbours.
+/// request always asks, also under a rule that covers its neighbours. One
+/// that can be a protected name is a protected path.
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_path_forms_always_ask() {
@@ -1570,28 +1571,30 @@ async fn windows_path_forms_always_ask() {
     let s = start_session(&mut app, &h.repo, "Edit files").await;
     allow_always(&mut app, &h.socket(), &s.id, edit(&format!("{}\\src\\a.rs", s.worktree))).await;
     allow_always(&mut app, &h.socket(), &s.id, bash("cp README.md docs.md")).await;
-    for payload in [
-        edit(&format!("{}\\CLAUDE~1\\settings.local.json", s.worktree)),
-        edit(&format!("{}\\.claude.\\settings.local.json", s.worktree)),
-        edit(&format!("{}\\src\\a.rs ", s.worktree)),
-        edit(&format!("{}\\src\\a.rs::$DATA", s.worktree)),
-        edit(&format!("{}\\src\\NUL", s.worktree)),
-        edit(&format!("{}/src\\COM1.log", s.worktree)),
-        edit(&format!("\\\\?\\{}\\src\\a.rs", s.worktree)),
-        edit(&format!("\\\\.\\{}\\src\\a.rs", s.worktree)),
-        edit("D:notes.md"),
-        bash("cp README.md D:notes"),
-        bash("cp README.md .claude./settings.local.json"),
+    let windows_path = "Windows path form that the rules cannot check";
+    for (payload, reason) in [
+        (edit(&format!("{}\\CLAUDE~1\\settings.local.json", s.worktree)), "protected path"),
+        (edit(&format!("{}\\.claude.\\settings.local.json", s.worktree)), "protected path"),
+        (edit(&format!("{}\\.mcp.json.", s.worktree)), "protected path"),
+        (edit(&format!("{}\\src\\a.rs ", s.worktree)), windows_path),
+        (edit(&format!("{}\\src\\a.rs::$DATA", s.worktree)), windows_path),
+        (edit(&format!("{}\\src\\NUL", s.worktree)), windows_path),
+        (edit(&format!("{}/src\\COM1.log", s.worktree)), windows_path),
+        (edit(&format!("\\\\?\\{}\\src\\a.rs", s.worktree)), windows_path),
+        (edit(&format!("\\\\.\\{}\\src\\a.rs", s.worktree)), windows_path),
+        (edit("D:notes.md"), windows_path),
+        (bash("cp README.md D:notes"), windows_path),
+        (bash("cp README.md .claude./settings.local.json"), "protected path"),
+        (bash("cp README.md CLAUDE~1/x"), "protected path"),
     ] {
         // Always allow lets this request through once and adds no rule.
         let mut hk = hook(&h.socket(), &s.id, payload.clone()).await;
         let a = app.approval_created().await;
-        assert_eq!(a.rule_preview, None, "{payload}");
+        assert_eq!((a.protected, &a.rule_preview), (reason == "protected path", &None), "{payload}");
         app.call(Request::ApprovalDecide { approval_id: a.id.clone(), decision: Decision::AllowAlways }).await;
         assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)), "{payload}");
         let rec = decided(&mut app, &a.id).await;
-        let once_only = json!("Windows path form that the rules cannot check");
-        assert_eq!((&rec.payload["rule"], &rec.payload["once_only"]), (&Value::Null, &once_only), "{payload}");
+        assert_eq!((&rec.payload["rule"], &rec.payload["once_only"]), (&Value::Null, &json!(reason)), "{payload}");
         // The same request asks again.
         asks_then_deny(&mut app, &h.socket(), &s.id, payload).await;
     }

@@ -49,10 +49,6 @@ const EXPANSION_CHARS: [char; 7] = ['*', '?', '[', '{', '\\', '~', '$'];
 /// whitespace. Shell punctuation is included, so `cat server.pem;` still
 /// names `server.pem`, and so is `@`, after which curl reads a file.
 const PATH_TOKEN_SEPARATORS: [char; 16] = ['"', '\'', '=', '>', '<', ';', '&', '|', '(', ')', '`', ',', ':', '{', '}', '@'];
-/// What separates the folders of a path in a protected path check. Windows
-/// takes a backslash as well as a slash.
-const PATH_SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
-
 /// Whose path rules apply. The rule checks take it as a parameter, so the
 /// Windows rules are tested on every platform.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +59,15 @@ enum Platform {
 
 /// The platform this daemon runs on.
 const PLATFORM: Platform = if cfg!(windows) { Platform::Windows } else { Platform::Unix };
+
+/// What separates the folders of a path. Windows takes a backslash as well
+/// as a slash.
+fn path_separators(platform: Platform) -> &'static [char] {
+    match platform {
+        Platform::Unix => &['/'],
+        Platform::Windows => &['/', '\\'],
+    }
+}
 /// Input fields that hold a path. Each is checked for protected paths, and a
 /// rule without a prefix needs every one that is present inside the worktree.
 const PATH_FIELDS: [&str; 3] = ["file_path", "notebook_path", "path"];
@@ -1124,7 +1129,7 @@ fn rule_for(tool: &str, summary: &str, input: &Value, worktree: &Path) -> Result
 
 /// [`rule_for`] by the path rules of `platform`.
 fn rule_for_on(tool: &str, summary: &str, input: &Value, worktree: &Path, platform: Platform) -> Result<AllowRule, OnceOnly> {
-    if request_is_protected(summary, input) {
+    if request_is_protected(summary, input, worktree, platform) {
         return Err(OnceOnly::Protected);
     }
     if tool == "PowerShell" {
@@ -1267,7 +1272,7 @@ fn once_only_command(words: &[&str]) -> Option<OnceOnly> {
 /// A command's name without its folder: `/usr/bin/env` is `env`. On Windows
 /// also without the extension that runs it: `git.exe` is `git`.
 fn program_name(word: &str) -> &str {
-    let name = word.rsplit(PATH_SEPARATORS).next().unwrap_or(word);
+    let name = word.rsplit(path_separators(PLATFORM)).next().unwrap_or(word);
     let ends_with = |ext: &&str| name.len() > ext.len() && name.get(name.len() - ext.len()..).is_some_and(|end| end.eq_ignore_ascii_case(ext));
     match [".exe", ".com", ".cmd", ".bat"].into_iter().find(ends_with) {
         Some(ext) if cfg!(windows) => &name[..name.len() - ext.len()],
@@ -1688,23 +1693,37 @@ fn shell_words(command: &str) -> Option<Vec<(&str, String)>> {
 /// Whether `summary` names a protected path: a file whose name starts with
 /// `.env` or ends with `.pem` or `.key`, a path to or through one of the
 /// [`PROTECTED_NAMES`], or one through `.config/gh` or `.config/gcloud`.
-/// Case-insensitive, and on Windows a backslash separates folders too. The
-/// UI flags these paths too, but this check is the one that is enforced, so
-/// it must not be looser.
-fn touches_protected_path(summary: &str) -> bool {
+/// Case-insensitive. On Windows a backslash separates folders too, a name
+/// counts without the dots and spaces that Windows drops from its end
+/// (`.claude.` is `.claude`), and a short (8.3) name such as `CLAUDE~1`
+/// counts as protected, as it can stand for any of them, unless it is in the
+/// worktree's own path. The UI flags these paths too, but this check is the
+/// one that is enforced, so it must not be looser.
+fn touches_protected_path(summary: &str, worktree: &Path, platform: Platform) -> bool {
     let lower = summary.to_lowercase();
-    // Quotes and escapes can split a name (`.s"s"h`, `.s\sh`), so the text
-    // is checked with them removed too. On Windows a backslash is also a
-    // folder separator, so there it is checked with only the quotes removed.
-    let unquoted = lower.replace(['"', '\'', '\\'], "");
-    let windows_unquoted = cfg!(windows).then(|| lower.replace(['"', '\''], ""));
-    [Some(lower), Some(unquoted), windows_unquoted].iter().flatten().any(|text| {
-        text.split(|c: char| c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c)).any(is_protected_token)
-    })
+    let names = spellings(&lower, platform).iter().any(|text| {
+        text.split(|c: char| c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c))
+            .any(|token| is_protected_token(token, platform))
+    });
+    names
+        || (platform == Platform::Windows
+            && spellings(&without_worktree(&lower, worktree), platform).iter().any(|text| has_short_name(text)))
 }
 
-fn is_protected_token(token: &str) -> bool {
-    let parts: Vec<&str> = token.split(PATH_SEPARATORS).collect();
+/// The texts a summary is checked as. Quotes and escapes can split a name
+/// (`.s"s"h`, `.s\sh`), so it is checked with them removed too. On Windows
+/// a backslash is also a folder separator, so there it is checked with only
+/// the quotes removed as well.
+fn spellings(text: &str, platform: Platform) -> Vec<String> {
+    let mut texts = vec![text.to_string(), text.replace(['"', '\'', '\\'], "")];
+    if platform == Platform::Windows {
+        texts.push(text.replace(['"', '\''], ""));
+    }
+    texts
+}
+
+fn is_protected_token(token: &str, platform: Platform) -> bool {
+    let parts: Vec<&str> = token.split(path_separators(platform)).map(|part| opened_name(part, platform)).collect();
     let name = parts.iter().rev().find(|part| !part.is_empty()).copied().unwrap_or_default();
     name.starts_with(".env")
         || name.ends_with(".pem")
@@ -1713,11 +1732,64 @@ fn is_protected_token(token: &str) -> bool {
         || parts.windows(2).any(|pair| pair[0] == ".config" && CREDENTIAL_CONFIG_DIRS.contains(&pair[1]))
 }
 
+/// The name that a part of a path opens. On Windows that is the part without
+/// the dots and spaces at its end, which Windows drops. `.` and `..` stay.
+fn opened_name(part: &str, platform: Platform) -> &str {
+    match platform {
+        Platform::Windows if part != "." && part != ".." => part.trim_end_matches(['.', ' ']),
+        _ => part,
+    }
+}
+
+/// Whether `text` holds a short (8.3) name: a `~` followed by a digit, as in
+/// `CLAUDE~1` or `SETTIN~1.JSO`. A `~` before anything else, as in `~/x`, is
+/// not one.
+fn has_short_name(text: &str) -> bool {
+    text.as_bytes().windows(2).any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+}
+
+/// `text`, which is lowercase, without the worktree's own path. That path is
+/// the daemon's, so a short name in it (a temp folder such as
+/// `C:\Users\RUNNER~1\...`) is not one the agent chose. The path is taken
+/// out where it is written whole, with either slash, and a folder or the end
+/// of a word comes next.
+fn without_worktree(text: &str, worktree: &Path) -> String {
+    let worktree = worktree.to_string_lossy().to_lowercase();
+    let worktree = worktree.trim_end_matches(['/', '\\']);
+    if worktree.is_empty() {
+        return text.to_string();
+    }
+    [worktree.to_string(), worktree.replace('\\', "/"), worktree.replace('/', "\\")]
+        .iter()
+        .fold(text.to_string(), |text, spelling| without_whole_path(&text, spelling))
+}
+
+/// `text` without each `path` in it that a slash, a backslash, whitespace,
+/// one of the [`PATH_TOKEN_SEPARATORS`] or the end of the text follows.
+fn without_whole_path(text: &str, path: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(path) {
+        let after = &rest[at + path.len()..];
+        let whole = after
+            .chars()
+            .next()
+            .is_none_or(|c| c == '/' || c == '\\' || c.is_whitespace() || PATH_TOKEN_SEPARATORS.contains(&c));
+        kept.push_str(&rest[..at]);
+        if !whole {
+            kept.push_str(path);
+        }
+        rest = after;
+    }
+    kept.push_str(rest);
+    kept
+}
+
 /// Whether a request touches a protected path, in its summary or in a path
 /// field of its input. Such a request is never allowed by a rule.
-fn request_is_protected(summary: &str, input: &Value) -> bool {
-    touches_protected_path(summary)
-        || PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str)).any(touches_protected_path)
+fn request_is_protected(summary: &str, input: &Value, worktree: &Path, platform: Platform) -> bool {
+    let paths = PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str));
+    std::iter::once(summary).chain(paths).any(|text| touches_protected_path(text, worktree, platform))
 }
 
 #[cfg(test)]
@@ -2801,7 +2873,10 @@ mod tests {
             // curl reads the file after `@`.
             "curl -d @.env localhost:8080",
         ] {
-            assert!(touches_protected_path(summary), "{summary:?}");
+            // Windows rules only add to the Unix ones.
+            for platform in [Platform::Unix, Platform::Windows] {
+                assert!(touches_protected_path(summary, Path::new("/w"), platform), "{summary:?} {platform:?}");
+            }
         }
     }
 
@@ -2828,23 +2903,121 @@ mod tests {
             "mcp.json",
             "npm install @types/node",
         ] {
-            assert!(!touches_protected_path(summary), "{summary:?}");
+            for platform in [Platform::Unix, Platform::Windows] {
+                assert!(!touches_protected_path(summary, Path::new("/w"), platform), "{summary:?} {platform:?}");
+            }
         }
     }
 
     #[test]
     fn protected_requests_include_input_path_fields() {
-        assert!(request_is_protected("Grep", &json!({"pattern": "token", "path": "/Users/x/.aws"})));
-        assert!(request_is_protected("NotebookEdit", &json!({"notebook_path": "/w/.ssh/n.ipynb"})));
-        assert!(request_is_protected("/w/.env", &json!({"file_path": "/w/.env"})));
-        // A search for the text ".env" is not a protected path.
-        assert!(!request_is_protected("Grep", &json!({"pattern": ".env", "path": "/w/src"})));
-        assert!(!request_is_protected("ls", &json!({"command": "ls", "description": "List the .env files"})));
+        for platform in [Platform::Unix, Platform::Windows] {
+            let protected = |summary: &str, input: Value| request_is_protected(summary, &input, Path::new("/w"), platform);
+            assert!(protected("Grep", json!({"pattern": "token", "path": "/Users/x/.aws"})), "{platform:?}");
+            assert!(protected("NotebookEdit", json!({"notebook_path": "/w/.ssh/n.ipynb"})), "{platform:?}");
+            assert!(protected("/w/.env", json!({"file_path": "/w/.env"})), "{platform:?}");
+            // A search for the text ".env" is not a protected path.
+            assert!(!protected("Grep", json!({"pattern": ".env", "path": "/w/src"})), "{platform:?}");
+            assert!(!protected("ls", json!({"command": "ls", "description": "List the .env files"})), "{platform:?}");
+        }
     }
 
-    #[cfg(windows)]
+    /// On Windows a protected name also counts without the dots and spaces
+    /// that Windows drops from its end, and a short (8.3) name counts as
+    /// protected, since it can stand for any of them. Unix reads names as
+    /// they are written.
+    #[test]
+    fn windows_protects_the_names_windows_reads_as_protected_ones() {
+        let worktree = Path::new("/repo/.worktrees/fix");
+        let protected = |summary: &str, platform| touches_protected_path(summary, worktree, platform);
+        for summary in [
+            // A dot or a space at the end of a name.
+            "/repo/.worktrees/fix/.claude./settings.local.json",
+            r".claude.\settings.local.json",
+            "cat .claude../settings.json",
+            ".mcp.json.",
+            "cert/server.pem.",
+            "id.key. .",
+            "~/.ssh./id_rsa",
+            "~/.config./gh/hosts.yml",
+            "~/.config/gcloud./credentials.db",
+            r"C:\Users\x\.aws.\credentials",
+            // Short names, in any case, quoted or escaped.
+            "/repo/.worktrees/fix/CLAUDE~1/settings.local.json",
+            r"C:\Users\x\CLAUDE~1\settings.json",
+            "cat SETTIN~1.JSO",
+            "MCP~1.JSO",
+            "type env~1",
+            "claude~12/x",
+            "CLAUDE~\"1\"",
+            r"CLAUDE~\1",
+        ] {
+            assert!(protected(summary, Platform::Windows), "{summary:?}");
+            assert!(!protected(summary, Platform::Unix), "{summary:?}");
+        }
+        // A space ends a word, so `.env ` is protected everywhere.
+        for summary in [".env ", "\".ssh /id_rsa\""] {
+            assert!(protected(summary, Platform::Windows) && protected(summary, Platform::Unix), "{summary:?}");
+        }
+        for summary in [
+            // A `~` before anything but a digit is not a short name.
+            "~/.zshrc",
+            "cat ~/notes.txt",
+            "ls ~user/x",
+            "a~b.txt",
+            "~",
+            // Ordinary names with dots, and `.` and `..`.
+            "src/a.rs.",
+            "docs/claude./x",
+            "./src/../README.md",
+            "...",
+            // A data stream or a drive asks each time, but is not protected.
+            "src/a.rs::$DATA",
+            "notes.txt:hidden",
+            "D:notes",
+            r"C:src\a.rs",
+        ] {
+            assert!(!protected(summary, Platform::Windows), "{summary:?}");
+            assert!(!protected(summary, Platform::Unix), "{summary:?}");
+        }
+        // The worktree's own path is the daemon's: a short name in it is not
+        // the agent's. Below it, beside it and elsewhere one is.
+        let short = Path::new("/Users/RUNNER~1/repo/.worktrees/fix");
+        let in_short = |summary: &str| touches_protected_path(summary, short, Platform::Windows);
+        assert!(!in_short("/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs"));
+        assert!(!in_short("/Users/RUNNER~1/repo/.worktrees/fix"));
+        assert!(!in_short(r"cat \Users\runner~1\repo\.worktrees\fix\src\a.rs"));
+        assert!(!in_short("cat \"/users/runner~1/repo/.worktrees/fix/src/a.rs\" README.md"));
+        assert!(in_short("/Users/RUNNER~1/repo/.worktrees/fix/CLAUDE~1/x"));
+        assert!(in_short("/Users/RUNNER~1/repo/.worktrees/fix2/src/a.rs"));
+        assert!(in_short("/Users/RUNNER~1/repo/src/a.rs"));
+        let drive = Path::new(r"C:\Users\RUNNER~1\repo\.worktrees\fix");
+        assert!(!touches_protected_path(r"C:\Users\RUNNER~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
+        assert!(!touches_protected_path("C:/Users/RUNNER~1/repo/.worktrees/fix/src/a.rs", drive, Platform::Windows));
+        assert!(!touches_protected_path(r"\\?\C:\Users\RUNNER~1\repo\.worktrees\fix\src\a.rs", drive, Platform::Windows));
+        assert!(touches_protected_path(r"C:\Users\RUNNER~1\repo\.worktrees\fix\.claude.\x", drive, Platform::Windows));
+
+        // These requests are protected, so Always allow says so, and the rest
+        // keep the reason they had.
+        let rule = |summary: &str, platform| rule_for_on("Edit", summary, &json!({ "file_path": summary }), worktree, platform);
+        for path in ["/repo/.worktrees/fix/CLAUDE~1/settings.local.json", "/repo/.worktrees/fix/.mcp.json."] {
+            assert_eq!(rule(path, Platform::Windows), Err(OnceOnly::Protected), "{path:?}");
+        }
+        for path in ["/repo/.worktrees/fix/src/a.rs::$DATA", "/repo/.worktrees/fix/NUL", "D:notes.md"] {
+            assert_eq!(rule(path, Platform::Windows), Err(OnceOnly::WindowsPath), "{path:?}");
+        }
+        let command = |command: &str| rule_for_on("Bash", command, &json!({ "command": command }), worktree, Platform::Windows);
+        assert_eq!(command("cp README.md .claude./settings.local.json"), Err(OnceOnly::Protected));
+        assert_eq!(command("cat CLAUDE~1/settings.local.json"), Err(OnceOnly::Protected));
+        assert_eq!(command("cat ~/.zshrc"), Err(OnceOnly::WindowsPath));
+        assert_eq!(command("cp README.md D:notes"), Err(OnceOnly::WindowsPath));
+    }
+
+    /// The check reads text only, so the Windows rules run on every platform.
     #[test]
     fn windows_paths_are_checked_with_backslashes_in_any_case() {
+        let w = Path::new(r"C:\Users\x\repo\.worktrees\fix");
+        let protected = |summary: &str| touches_protected_path(summary, w, Platform::Windows);
         for summary in [
             r"C:\Users\x\.ssh\id_rsa",
             r"type C:\Users\x\.aws\credentials",
@@ -2856,14 +3029,17 @@ mod tests {
             r#"C:\Users\x\.s"s"h\id_rsa"#,
             r"cert\server.PEM",
             r"C:/Users/x/.kube/config",
+            r"C:\Users\x\repo\.worktrees\fix\CLAUDE~1\settings.local.json",
+            r"C:\Users\x\repo\.worktrees\fix\.claude.\settings.local.json",
         ] {
-            assert!(touches_protected_path(summary), "{summary:?}");
+            assert!(protected(summary), "{summary:?}");
         }
         for summary in [r"C:\Users\x\repo\src\env.ts", r"C:\Users\x\repo\README.md", r"src\claude.rs", r"docs\gh\setup.md"] {
-            assert!(!touches_protected_path(summary), "{summary:?}");
+            assert!(!protected(summary), "{summary:?}");
         }
-        assert!(request_is_protected("Edit", &json!({"file_path": r"C:\w\.mcp.json"})));
-        assert_eq!(rule_of("Edit", json!({"file_path": r"C:\Users\x\.ssh\config"})), Err(OnceOnly::Protected));
+        assert!(request_is_protected("Edit", &json!({"file_path": r"C:\w\.mcp.json"}), w, Platform::Windows));
+        let ssh = r"C:\Users\x\.ssh\config";
+        assert_eq!(rule_for_on("Edit", ssh, &json!({ "file_path": ssh }), w, Platform::Windows), Err(OnceOnly::Protected));
     }
 
     #[cfg(windows)]
@@ -2995,8 +3171,8 @@ mod tests {
             "cp README.md C:/repo/.worktrees/fix/x",
             // Streams, names Windows changes, devices and prefixes.
             "cp README.md notes.txt:hidden",
-            "cp README.md .claude./settings.local.json",
-            "cp README.md .mcp.json.",
+            "cp README.md docs./notes.md",
+            "cp README.md notes.md.",
             "cp README.md \"docs /x\"",
             "cp README.md NUL",
             "cp README.md docs/com1.txt",
@@ -3018,6 +3194,15 @@ mod tests {
         // A word Windows reads as another path anywhere in the command, not
         // only in the words the rule keeps, gets no rule.
         assert_eq!(rule_of("cp README.md docs/x README.md.", Platform::Windows), Err(OnceOnly::WindowsPath));
+        // One that Windows reads as a protected name is a protected path there.
+        for command in ["cp README.md .claude./settings.local.json", "cp README.md .mcp.json.", "cp README.md CLAUDE~1/x"] {
+            assert!(!covers(command, Platform::Windows), "{command:?}");
+            assert_eq!(rule_of(command, Platform::Windows), Err(OnceOnly::Protected), "{command:?}");
+        }
+        for command in ["cp README.md .claude./settings.local.json", "cp README.md .mcp.json."] {
+            assert!(covers(command, Platform::Unix), "{command:?}");
+            assert_eq!(rule_of(command, Platform::Unix), Ok(rule.clone()), "{command:?}");
+        }
     }
 
     /// The same checks with real Windows paths, as the daemon runs them.
