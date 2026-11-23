@@ -16,6 +16,8 @@ export function TitleBar() {
   const themeLabel = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
   const keys = keyHints(platform);
 
+  // A drag starts only on an element that itself has data-tauri-drag-region, not on its
+  // children, so each empty area of the bar carries it. The buttons stay clickable.
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="traffic" data-tauri-drag-region style={isMac ? { paddingLeft: TRAFFIC_LIGHTS_INSET } : undefined} />
@@ -24,7 +26,7 @@ export function TitleBar() {
         <span>Search or run a command</span>
         <kbd className="kbd">{keys.palette}</kbd>
       </button>
-      <div className="titlebar-right">
+      <div className="titlebar-right" data-tauri-drag-region>
         <button className="icon-btn bell" type="button" aria-label="Notifications" onClick={() => go('#approvals')}>
           <Icon name="bell" />
           {n > 0 && <span className="bell-count">{n}</span>}
