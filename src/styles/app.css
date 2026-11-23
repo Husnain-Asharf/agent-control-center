@@ -786,3 +786,4 @@ a:hover .node-ring, a:focus-visible .node-ring { stroke-width: 2.8; }
 
 /* Daemon down */
 .offline-banner { margin: 0 0 16px; padding: 10px 14px; border-radius: var(--r-md); background: var(--red-soft); color: var(--red-text); font-size: 12.5px; }
+.usage-store { padding: 8px 16px 4px; font-size: 12px; }

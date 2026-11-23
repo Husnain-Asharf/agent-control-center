@@ -6,6 +6,7 @@ import { openNewSession } from '../dialogs/NewSessionDialog';
 import { fmtDur } from '../lib/format';
 import { decide, isBranchQuestion, isProtectedApproval, wantsVerb } from '../lib/approvals';
 import { fmtCost, level, resetText, usageByProject } from '../lib/usage';
+import { fmtBytes, useStats } from '../lib/stats';
 import type { PlanLimit } from '../lib/types';
 import { segmentsFor } from '../lib/segments';
 import { useStore } from '../store/store';
@@ -21,6 +22,8 @@ export function Overview() {
   const sessions = useStore((s) => s.sessions);
   const approvals = useStore((s) => s.approvals);
   const planUsage = useStore((s) => s.planUsage);
+  const stats = useStats();
+  const memoryTotal = (stats?.sessions ?? []).reduce((n, r) => n + (r.memory_bytes ?? 0), 0);
   const [range, setRange] = useState<Range>(60);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const now = useNow();
@@ -154,6 +157,12 @@ export function Overview() {
             <LimitRow label="This week" limit={planUsage?.seven_day ?? null} now={now} />
             {!planUsage && (
               <p className="empty-line">Shows once a running session reports it. Only Claude plans have these limits.</p>
+            )}
+            {stats && (
+              <p className="usage-store muted">
+                App data {fmtBytes(stats.data_bytes)}, of which the database is {fmtBytes(stats.db_bytes)}.
+                {memoryTotal > 0 && <> Sessions use {fmtBytes(memoryTotal)} of memory.</>}
+              </p>
             )}
           </div>
           <div className="list usage-projects">

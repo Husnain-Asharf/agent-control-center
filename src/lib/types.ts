@@ -124,7 +124,32 @@ export type DaemonEvent =
   | { kind: 'approval_resolved'; data: Approval }
   | { kind: 'project_added'; data: Project }
   | { kind: 'event_appended'; data: EventRecord }
-  | { kind: 'plan_usage_updated'; data: PlanUsage };
+  | { kind: 'plan_usage_updated'; data: PlanUsage }
+  | { kind: 'session_removed'; data: { session_id: string } }
+  | { kind: 'project_removed'; data: { project_id: string } };
+
+export interface SessionStats {
+  session_id: string;
+  /** Claude Code and everything it started. Null where it cannot be measured (Windows). */
+  memory_bytes: number | null;
+  processes: number;
+  scrollback_bytes: number;
+  transcript_bytes: number | null;
+  /** The session's own worktree; null for a session in the project folder. */
+  folder_bytes: number | null;
+}
+
+export interface Stats {
+  db_bytes: number;
+  data_bytes: number;
+  sessions: SessionStats[];
+}
+
+export interface SessionRemoved {
+  worktree_removed: boolean;
+  branch_removed: boolean;
+  kept: string | null;
+}
 
 export interface DaemonStatusPayload {
   connected: boolean;

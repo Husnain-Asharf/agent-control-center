@@ -5,6 +5,10 @@ import { errorText } from '../lib/errorText';
 import { eventText } from '../lib/eventText';
 import { clock, fmtTimer, folderLabel } from '../lib/format';
 import { fmtCost, level } from '../lib/usage';
+import { fmtBytes, useStats } from '../lib/stats';
+import { Dialog } from '../components/Dialog';
+import { go } from '../lib/route';
+import type { SessionRemoved } from '../lib/types';
 import { request } from '../lib/ipc';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
@@ -41,6 +45,8 @@ export function SessionView() {
   const project = useStore((s) => (session ? s.projects[session.project_id] : undefined));
   const pending = useStore((s) => (param ? pendingForSession(s, param) : undefined));
   const pushToast = useStore((s) => s.pushToast);
+  const [removing, setRemoving] = useState(false);
+  const stats = useStats();
   const connEpoch = useStore((s) => s.connEpoch);
   const [now, setNow] = useState(() => Date.now());
   const events = useEvents(param ?? '');
@@ -69,6 +75,7 @@ export function SessionView() {
   const act = (method: 'session_stop' | 'session_restart') =>
     request(method, { session_id: session.id }).catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
 
+  const mine = stats?.sessions.find((r) => r.session_id === session.id);
   const elapsed = (running ? now : (session.ended_at ?? session.status_since)) - session.started_at;
   const folder = folderLabel(session);
 
@@ -89,6 +96,11 @@ export function SessionView() {
           <button className="btn btn--danger" type="button" disabled={!running} onClick={() => act('session_stop')}>
             Stop
           </button>
+          {!running && (
+            <button className="btn btn--ghost" type="button" onClick={() => setRemoving(true)}>
+              Remove
+            </button>
+          )}
         </div>
         <dl className="meta">
           <div>
@@ -156,6 +168,24 @@ export function SessionView() {
               </div>
             </>
           )}
+          {mine && fmtBytes(mine.memory_bytes) && (
+            <div>
+              <dt>Memory</dt>
+              <dd title={`${mine.processes} ${mine.processes === 1 ? 'process' : 'processes'}: Claude Code and what it started`}>
+                {fmtBytes(mine.memory_bytes)}
+              </dd>
+            </div>
+          )}
+          {mine && (fmtBytes(mine.transcript_bytes) || fmtBytes(mine.folder_bytes)) && (
+            <div>
+              <dt>Disk</dt>
+              <dd title="The conversation file, and the session's own worktree if it has one">
+                {[fmtBytes(mine.transcript_bytes) && `${fmtBytes(mine.transcript_bytes)} chat`, fmtBytes(mine.folder_bytes) && `${fmtBytes(mine.folder_bytes)} worktree`]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </dd>
+            </div>
+          )}
           <div>
             <dt>{running ? 'Running' : 'Ran for'}</dt>
             <dd>{fmtTimer(elapsed)}</dd>
@@ -196,6 +226,54 @@ export function SessionView() {
           </div>
         </aside>
       </div>
+      {removing && <RemoveDialog session={session} onClose={() => setRemoving(false)} />}
     </div>
+  );
+}
+
+function RemoveDialog({ session, onClose }: { session: Session; onClose: () => void }) {
+  const pushToast = useStore((s) => s.pushToast);
+  const own = session.mode !== 'project';
+  const [alsoWorktree, setAlsoWorktree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const r = await request<SessionRemoved>('session_remove', { session_id: session.id, remove_worktree: own && alsoWorktree });
+      onClose();
+      go('#sessions');
+      if (own && alsoWorktree) {
+        const msg = r.worktree_removed
+          ? r.branch_removed
+            ? `Removed ${session.title} with its worktree and branch.`
+            : `Removed ${session.title} and its worktree. The branch ${session.branch} was kept: ${r.kept ?? 'git kept it'}.`
+          : `Removed ${session.title}. Its worktree was kept: ${r.kept ?? 'git kept it'}.`;
+        pushToast({ msg, kind: r.worktree_removed && r.branch_removed ? 'done' : 'needs' });
+      }
+    } catch (e) {
+      pushToast({ msg: errorText(e), kind: 'failed' });
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog title="Remove session" onClose={onClose} onSubmit={submit}>
+      <p className="muted">
+        {session.title} leaves the app with its history. Its files and commits stay where they are.
+      </p>
+      {own && (
+        <label className="check">
+          <input type="checkbox" checked={alsoWorktree} onChange={(e) => setAlsoWorktree(e.target.checked)} />
+          Also delete its worktree and the branch {session.branch}, if git can do it without losing work
+        </label>
+      )}
+      <div className="dialog-actions">
+        <button type="button" className="btn btn--ghost" onClick={onClose}>
+          Cancel
+        </button>
+        <button type="submit" className="btn btn--danger" disabled={busy}>
+          Remove
+        </button>
+      </div>
+    </Dialog>
   );
 }

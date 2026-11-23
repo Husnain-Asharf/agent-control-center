@@ -172,6 +172,15 @@ export const useStore = create<State>()((set) => ({
         }
         case 'plan_usage_updated':
           return { planUsage: e.data };
+        case 'session_removed': {
+          const { [e.data.session_id]: _gone, ...sessions } = st.sessions;
+          const approvals = Object.fromEntries(Object.entries(st.approvals).filter(([, a]) => a.session_id !== e.data.session_id));
+          return { sessions, approvals };
+        }
+        case 'project_removed': {
+          const { [e.data.project_id]: _gone, ...projects } = st.projects;
+          return { projects };
+        }
         case 'event_appended':
           if (st.events.some((x) => x.seq === e.data.seq)) return st;
           return { events: [e.data, ...st.events].slice(0, MAX_EVENTS) };

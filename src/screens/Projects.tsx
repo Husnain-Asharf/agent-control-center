@@ -3,10 +3,13 @@ import { FleetLanes, RangeControl, byRank, useNow, type Range } from '../compone
 import { Icon } from '../components/Icon';
 import { Lamp } from '../components/Lamp';
 import { AddProjectDialog } from '../dialogs/AddProjectDialog';
+import { Dialog } from '../components/Dialog';
 import { openNewSession } from '../dialogs/NewSessionDialog';
 import { monogram } from '../lib/format';
 import { needsYouForProject } from '../lib/needs';
-import { useRoute } from '../lib/route';
+import { go, useRoute } from '../lib/route';
+import { request } from '../lib/ipc';
+import { errorText } from '../lib/errorText';
 import { sessionsByProject, useStore } from '../store/store';
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -76,6 +79,8 @@ export function Projects() {
 
 export function ProjectPage() {
   const { param } = useRoute();
+  const pushToast = useStore((s) => s.pushToast);
+  const [removing, setRemoving] = useState(false);
   const project = useStore((s) => (param ? s.projects[param] : undefined));
   const projects = useStore((s) => s.projects);
   const sessions = useStore((s) => s.sessions);
@@ -123,6 +128,9 @@ export function ProjectPage() {
           </p>
         </div>
         <div className="head-actions">
+          <button className="btn btn--ghost" type="button" onClick={() => setRemoving(true)}>
+            Remove project
+          </button>
           <button className="btn btn--primary" type="button" onClick={openNewSession}>
             <Icon name="plus" />
             New session
@@ -130,6 +138,33 @@ export function ProjectPage() {
           </button>
         </div>
       </div>
+      {removing && (
+        <Dialog
+          title="Remove project"
+          onClose={() => setRemoving(false)}
+          onSubmit={() =>
+            request('project_remove', { project_id: project.id })
+              .then(() => go('#projects'))
+              .catch((e: unknown) => {
+                setRemoving(false);
+                pushToast({ msg: errorText(e), kind: 'failed' });
+              })
+          }
+        >
+          <p className="muted">
+            {project.name} and its sessions leave the app. The folder and its git history stay as they are. Stop its
+            running sessions first.
+          </p>
+          <div className="dialog-actions">
+            <button type="button" className="btn btn--ghost" onClick={() => setRemoving(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn--danger">
+              Remove
+            </button>
+          </div>
+        </Dialog>
+      )}
       <section className="block" aria-labelledby="live-h">
         <div className="block-head">
           <h2 id="live-h">Sessions</h2>
