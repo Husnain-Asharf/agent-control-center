@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-23
+
+Sessions in the project folder, a Settings screen, and fixes from the first
+run on a real Mac.
+
+### Changed
+
+- New sessions work in the project folder, on its current branch, so sessions
+  in one project build on each other's changes. No worktree and no branch are
+  made when a session starts. Choose "Separate folder and branch" in the New
+  session form to give a session its own worktree and `agent/<slug>` branch,
+  as before.
+
+### Added
+
+- The first file edit or commit of a session in the project folder, while the
+  folder is on the base branch, asks in the inbox: make a branch first, allow
+  it on the base branch, or deny. Make branch keeps uncommitted changes, runs
+  no repo hook, and moves every session in the folder to the new branch. It
+  asks in Claude Code's auto and accept-edits modes too.
+- A Settings screen: theme, text size for the whole app, terminal text size,
+  bolder text and the approval chime. Cmd or Ctrl with `=`, `-` and `0` change
+  the text size.
+- A New session button on the project page.
+
+### Fixed
+
+- On macOS the window can be dragged by its title bar.
+- Sessions get the PATH from an interactive login shell, so folders added in
+  `~/.zshrc` or `~/.bashrc`, such as nvm's Node, are found. The login shell
+  alone is the fallback.
+
+### Security
+
+- Sessions in the project folder do not load the checkout's
+  `.claude/settings.local.json`, whose saved rules would run commands without
+  reaching the inbox. A request of theirs on a protected path waits for an
+  approval in every permission mode.
+- `.git`, the folder that `core.hooksPath` names, keystores (`.jks`, `.p12`,
+  `.pfx`, `.keystore`, `.p8`), `key.properties` and `credentials*.json` and
+  `service-account*.json` files are protected paths.
+- Rules never cover a path in `.worktrees`, where other sessions' worktrees
+  are.
+
 ## [0.3.1] - 2026-11-23
 
 Windows fixes and updated dependencies.
@@ -141,6 +185,7 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.4.0]: ../../releases/tag/v0.4.0
 [0.3.1]: ../../releases/tag/v0.3.1
 [0.3.0]: ../../releases/tag/v0.3.0
 [0.2.0]: ../../releases/tag/v0.2.0
