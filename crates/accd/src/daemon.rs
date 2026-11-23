@@ -1735,7 +1735,7 @@ fn folder_size(dir: &Path) -> Option<u64> {
 /// Every process with its parent and resident memory in bytes, from `ps`.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32, u64)> {
-    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,rss="]).output() else { return Vec::new() };
+    let Ok(out) = std::process::Command::new("ps").args(["-e", "-o", "pid=,ppid=,rss="]).output() else { return Vec::new() };
     parse_process_table(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -4344,8 +4344,9 @@ mod tests {
 
     #[test]
     fn transcripts_are_where_claude_code_keeps_them() {
-        let path = transcript_path(Path::new("/home/x"), Path::new("/my repo/.worktrees/fix"), "abc");
-        assert_eq!(path, Path::new("/home/x/.claude/projects/-my-repo--worktrees-fix/abc.jsonl"));
+        let home = Path::new("/home/x");
+        let path = transcript_path(home, Path::new("/my repo/.worktrees/fix"), "abc");
+        assert_eq!(path, home.join(".claude").join("projects").join("-my-repo--worktrees-fix").join("abc.jsonl"));
     }
 
     #[test]
