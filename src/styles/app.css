@@ -805,3 +805,27 @@ a:hover .node-ring, a:focus-visible .node-ring { stroke-width: 2.8; }
 .coord-card li.is-overlap code { color: var(--amber-text); }
 .coord-overlaps { margin-top: 14px; padding: 8px 14px; border-radius: var(--r-md); background: var(--amber-soft); color: var(--amber-text); font-size: 12.5px; }
 .coord-label { margin: 18px 0 0; font-size: 12px; }
+
+/* Glass (Settings, Style). The frame turns translucent. style.ts derives the --glass-*
+   colors from the panel colors in use, at the lowest alpha where text keeps AA over any
+   backdrop. Cards, inputs and wells stay opaque, and the terminal stays solid.
+   Until macOS vibrancy is on (data-see-through), and on Windows and Linux, the panels sit
+   over a soft grey backdrop of the app's own. */
+:root[data-style="glass"] body {
+  background:
+    radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--ink) 12%, var(--chrome)), transparent 70%),
+    radial-gradient(90% 80% at 100% 100%, color-mix(in srgb, var(--ink) 6%, var(--chrome)), transparent 70%),
+    var(--chrome);
+}
+:root[data-style="glass"][data-see-through] body { background: transparent; }
+:root[data-style="glass"] :is(.titlebar, .sidebar, .statusbar, .pane-list) { background: var(--glass-chrome, var(--chrome)); }
+:root[data-style="glass"] .main { background: var(--glass-panel, var(--panel)); }
+:root[data-style="glass"] .side-foot { background: var(--glass-chrome, var(--chrome)); backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%); }
+:root[data-style="glass"] .decide-bar { background: var(--glass-panel, var(--panel)); backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%); }
+:root[data-style="glass"] :is(.palette, .dialog, .inbox, .toast) { background: var(--glass-raised, var(--raised)); backdrop-filter: blur(24px) saturate(150%); -webkit-backdrop-filter: blur(24px) saturate(150%); }
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-style="glass"] body, :root[data-style="glass"][data-see-through] body { background: var(--panel); }
+  :root[data-style="glass"] :is(.titlebar, .sidebar, .statusbar, .pane-list, .side-foot) { background: var(--chrome); }
+  :root[data-style="glass"] :is(.main, .decide-bar) { background: var(--panel); }
+  :root[data-style="glass"] :is(.palette, .dialog, .inbox, .toast) { background: var(--raised); }
+}

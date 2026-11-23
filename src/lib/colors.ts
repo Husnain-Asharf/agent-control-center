@@ -215,7 +215,8 @@ const linear = (c: number): number => {
   return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
 };
 
-function luminance(hex: string): number {
+/** Relative luminance of a color, from 0 (black) to 1 (white). */
+export function luminance(hex: string): number {
   const [r, g, b] = toRgb(hex).map(linear);
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
@@ -264,12 +265,13 @@ export const MIN_TEXT_CONTRAST = 4.5;
 export const lowContrastText = (colors: ColorSet): ColorKey[] =>
   (['ink', 'ink-2'] as const).filter((k) => contrast(colors[k], colors.panel) < MIN_TEXT_CONTRAST);
 
-const mix = (a: string, b: string, t: number): string => {
+/** `a` moved toward `b` by `t`, from 0 (all `a`) to 1 (all `b`), as hex. */
+export const mix = (a: string, b: string, t: number): string => {
   const [x, y] = [toRgb(a), toRgb(b)];
   return toHex([0, 1, 2].map((i) => x[i] + (y[i] - x[i]) * t) as Rgb);
 };
 
-const rgba = (hex: string, alpha: number): string => `rgba(${toRgb(hex).join(',')},${alpha})`;
+export const rgba = (hex: string, alpha: number): string => `rgba(${toRgb(hex).join(',')},${alpha})`;
 
 /**
  * The partners of a state color. `-text` is the color itself, moved toward the text color

@@ -10,6 +10,7 @@ import {
   type ColorKey,
 } from '../lib/colors';
 import { keyHints, platform } from '../lib/platform';
+import { STYLES, STYLE_LABEL, styleNote } from '../lib/style';
 import type { Theme } from '../lib/types';
 import { useStore } from '../store/store';
 
@@ -130,6 +131,8 @@ function Colors() {
 export function Settings() {
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
+  const style = useStore((s) => s.style);
+  const setStyle = useStore((s) => s.setStyle);
   const textScale = useStore((s) => s.textScale);
   const setTextScale = useStore((s) => s.setTextScale);
   const bolder = useStore((s) => s.bolder);
@@ -163,6 +166,9 @@ export function Settings() {
                 if (t !== theme) toggleTheme();
               }}
             />
+          </Row>
+          <Row title="Style" note={styleNote(platform)}>
+            <Choice label="Style" options={STYLES} value={style} text={(v) => STYLE_LABEL[v]} onChange={setStyle} />
           </Row>
           <Row
             title="Text size"

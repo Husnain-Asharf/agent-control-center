@@ -19,6 +19,7 @@ import {
   type ColorKey,
   type PresetId,
 } from '../lib/colors';
+import { applyStyle, parseStyle, type Style } from '../lib/style';
 import type {
   Approval,
   DaemonEvent,
@@ -37,6 +38,7 @@ const SOUND_KEY = 'acc-sound';
 const TEXT_SCALE_KEY = 'acc-text-scale';
 const TERM_FONT_KEY = 'acc-term-font-size';
 const BOLDER_KEY = 'acc-bolder';
+const STYLE_KEY = 'acc-style';
 
 export interface State {
   connected: boolean;
@@ -60,6 +62,8 @@ export interface State {
   /** Font size of session terminals, in CSS pixels. */
   termFontSize: TermFontSize;
   bolder: boolean;
+  /** Solid or glass panels. */
+  style: Style;
   /** Colors per theme. The one for the current theme is on <html>. */
   colors: Record<Theme, ColorChoice>;
   applySnapshot: (s: Snapshot) => void;
@@ -72,6 +76,7 @@ export interface State {
   setTextScale: (scale: TextScale) => void;
   setTermFontSize: (size: TermFontSize) => void;
   toggleBolder: () => void;
+  setStyle: (style: Style) => void;
   /** Switches the current theme to a preset. */
   setColorPreset: (id: PresetId) => void;
   /** Changes one color of the current theme. */
@@ -129,6 +134,8 @@ applyTextScale(initialTextScale);
 const readColors = (theme: Theme): ColorChoice => parseColors(theme, readSaved(colorsKey(theme)));
 const initialColors: Record<Theme, ColorChoice> = { dark: readColors('dark'), light: readColors('light') };
 applyColors(initialTheme, initialColors[initialTheme]);
+const initialStyle = parseStyle(readSaved(STYLE_KEY));
+applyStyle(initialStyle, initialTheme);
 
 export const useStore = create<State>()((set) => ({
   connected: false,
@@ -145,6 +152,7 @@ export const useStore = create<State>()((set) => ({
   textScale: initialTextScale,
   termFontSize: parseTermFontSize(readSaved(TERM_FONT_KEY)),
   bolder: initialBolder,
+  style: initialStyle,
   colors: initialColors,
 
   applySnapshot: (s) =>
@@ -205,6 +213,7 @@ export const useStore = create<State>()((set) => ({
       const theme: Theme = st.theme === 'dark' ? 'light' : 'dark';
       applyTheme(theme);
       applyColors(theme, st.colors[theme]);
+      applyStyle(st.style, theme);
       return { theme };
     }),
 
@@ -234,6 +243,13 @@ export const useStore = create<State>()((set) => ({
       return { bolder };
     }),
 
+  setStyle: (style) =>
+    set((st) => {
+      save(STYLE_KEY, style);
+      applyStyle(style, st.theme);
+      return { style };
+    }),
+
   setColorPreset: (id) => set((st) => updateColors(st, { preset: id, colors: presetColors(st.theme, id) })),
 
   setColor: (key, hex) =>
@@ -257,6 +273,8 @@ function updateColors(st: State, choice: ColorChoice): Pick<State, 'colors'> {
     }
   } else save(key, JSON.stringify(choice));
   applyColors(st.theme, choice);
+  // Glass derives its colors from these.
+  applyStyle(st.style, st.theme);
   return { colors: { ...st.colors, [st.theme]: choice } };
 }
 
