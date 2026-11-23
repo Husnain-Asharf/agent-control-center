@@ -81,7 +81,7 @@ The Windows builds are for x64. Windows support is new, so please [open an issue
 1. Download the `.msi` or the `-setup.exe`. Either one installs the app.
 2. Open it. The builds are unsigned, so SmartScreen says "Windows protected your PC". Choose More info, then Run anyway.
 
-Before you upgrade or uninstall, end the daemon: `taskkill /IM accd.exe /F`. The installer cannot replace files the running daemon uses.
+The `-setup.exe` ends the daemon before it upgrades or uninstalls the app, which also ends running sessions. With the `.msi`, or to uninstall 0.3.0, end it first: `taskkill /IM accd.exe /F`.
 
 ## Requirements
 

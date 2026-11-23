@@ -142,7 +142,7 @@ On Windows: `taskkill /IM accd.exe /F`.
 - On Windows, Always allow never covers a short (8.3) name such as `CLAUDE~1`, a name that ends in a dot or a space, a device name such as `NUL` or `COM1`, a data stream such as `file::$DATA`, or a `\\?\` or `\\.\` prefix. Windows can read these as another file, so they ask each time.
 - On Windows, a git revision such as `HEAD~1` looks like a short name, so a command with one asks each time. It shows as a protected path only when its first two characters match a protected name's short form, as in `cleanup~1` (`.claude`) or `docs~1` (`.docker`).
 - On Windows, credentials that tools keep under `AppData`, such as those of gh and gcloud, are not protected paths.
-- Before you upgrade or uninstall on Windows, end the daemon: `taskkill /IM accd.exe /F`. The installer cannot replace files the running daemon uses.
+- On Windows the `-setup.exe` ends the daemon before it upgrades or uninstalls the app, and running sessions end with it. The `.msi` does not: end the daemon first (`taskkill /IM accd.exe /F`), as you must before uninstalling 0.3.0, because Windows cannot replace or remove the files of a running program.
 - If you set `ACC_DATA_DIR` on Windows, point it at a folder only you can open. The default, under `%LOCALAPPDATA%`, is private.
 - On Windows, a task for a `claude.cmd` (npm) can be about 7,000 characters at most, because that is what cmd.exe can run. The native `claude.exe` takes longer ones.
 - Worktrees and their `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
