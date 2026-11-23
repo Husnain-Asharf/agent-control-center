@@ -245,6 +245,58 @@ describe('text settings', () => {
   });
 });
 
+describe('colors', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  const load = async (saved: Record<string, string>) => {
+    const props = new Map<string, string>();
+    const style = {
+      setProperty: (k: string, v: string) => props.set(k, v),
+      removeProperty: (k: string) => props.delete(k),
+    };
+    vi.stubGlobal('document', { documentElement: { dataset: {}, style } });
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => saved[k] ?? null,
+      setItem: (k: string, v: string) => {
+        saved[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete saved[k];
+      },
+    });
+    vi.resetModules();
+    return { fresh: await import('./store'), props };
+  };
+
+  it('applies the saved colors of the current theme at startup and on a theme switch', async () => {
+    const warm = JSON.stringify({ preset: 'warm', colors: {} });
+    const { fresh, props } = await load({ 'acc-colors-dark': warm });
+    expect(props.get('--panel')).toBe('#1a1814');
+    fresh.useStore.getState().toggleTheme();
+    expect(props.size).toBe(0);
+    fresh.useStore.getState().toggleTheme();
+    expect(props.get('--panel')).toBe('#1a1814');
+  });
+
+  it('saves changes per theme and reset clears them', async () => {
+    const saved: Record<string, string> = {};
+    const { fresh, props } = await load(saved);
+    const st = () => fresh.useStore.getState();
+    st().setColor('cyan', '#0088FF');
+    expect(props.get('--cyan')).toBe('#0088ff');
+    expect(JSON.parse(saved['acc-colors-dark']).colors.cyan).toBe('#0088ff');
+    expect(saved['acc-colors-light']).toBeUndefined();
+    st().setColorPreset('blue');
+    expect(JSON.parse(saved['acc-colors-dark']).preset).toBe('blue');
+    st().resetColors();
+    expect(saved['acc-colors-dark']).toBeUndefined();
+    expect(props.size).toBe(0);
+  });
+});
+
 describe('connEpoch', () => {
   it('increments on false to true and not on true to true', () => {
     const { setConnected } = useStore.getState();

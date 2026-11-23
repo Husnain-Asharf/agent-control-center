@@ -31,6 +31,7 @@ export function TerminalView({ sessionId }: { sessionId: string }) {
   const termRef = useRef<Terminal | null>(null);
   const sendSizeRef = useRef<(() => void) | null>(null);
   const theme = useStore((s) => s.theme);
+  const colors = useStore((s) => s.colors[s.theme]);
   const fontSize = useStore((s) => s.termFontSize);
   const bolder = useStore((s) => s.bolder);
 
@@ -111,11 +112,11 @@ export function TerminalView({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  // Colors come from CSS variables, so re-read them when the theme flips.
+  // Colors come from CSS variables, so re-read them when the theme or the colors change.
   useEffect(() => {
     const term = termRef.current;
     if (term) term.options.theme = termTheme();
-  }, [theme]);
+  }, [theme, colors]);
 
   // A new font size or weight from Settings changes the cell size, so refit and send the
   // new columns and rows to the daemon.

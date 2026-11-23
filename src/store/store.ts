@@ -8,6 +8,17 @@ import {
   type TermFontSize,
   type TextScale,
 } from '../lib/appearance';
+import {
+  applyColors,
+  colorsKey,
+  defaultChoice,
+  matchingPreset,
+  parseColors,
+  presetColors,
+  type ColorChoice,
+  type ColorKey,
+  type PresetId,
+} from '../lib/colors';
 import type {
   Approval,
   DaemonEvent,
@@ -49,6 +60,8 @@ export interface State {
   /** Font size of session terminals, in CSS pixels. */
   termFontSize: TermFontSize;
   bolder: boolean;
+  /** Colors per theme. The one for the current theme is on <html>. */
+  colors: Record<Theme, ColorChoice>;
   applySnapshot: (s: Snapshot) => void;
   applyEvent: (e: DaemonEvent) => void;
   setConnected: (b: boolean, error?: string | null) => void;
@@ -59,6 +72,12 @@ export interface State {
   setTextScale: (scale: TextScale) => void;
   setTermFontSize: (size: TermFontSize) => void;
   toggleBolder: () => void;
+  /** Switches the current theme to a preset. */
+  setColorPreset: (id: PresetId) => void;
+  /** Changes one color of the current theme. */
+  setColor: (key: ColorKey, hex: string) => void;
+  /** Returns the current theme to its default colors. */
+  resetColors: () => void;
 }
 
 const byId = <T extends { id: string }>(list: T[]): Record<string, T> =>
@@ -107,6 +126,9 @@ const initialBolder = parseBolder(readSaved(BOLDER_KEY));
 setBolderAttr(initialBolder);
 const initialTextScale = parseTextScale(readSaved(TEXT_SCALE_KEY));
 applyTextScale(initialTextScale);
+const readColors = (theme: Theme): ColorChoice => parseColors(theme, readSaved(colorsKey(theme)));
+const initialColors: Record<Theme, ColorChoice> = { dark: readColors('dark'), light: readColors('light') };
+applyColors(initialTheme, initialColors[initialTheme]);
 
 export const useStore = create<State>()((set) => ({
   connected: false,
@@ -123,6 +145,7 @@ export const useStore = create<State>()((set) => ({
   textScale: initialTextScale,
   termFontSize: parseTermFontSize(readSaved(TERM_FONT_KEY)),
   bolder: initialBolder,
+  colors: initialColors,
 
   applySnapshot: (s) =>
     set({
@@ -172,6 +195,7 @@ export const useStore = create<State>()((set) => ({
     set((st) => {
       const theme: Theme = st.theme === 'dark' ? 'light' : 'dark';
       applyTheme(theme);
+      applyColors(theme, st.colors[theme]);
       return { theme };
     }),
 
@@ -200,7 +224,32 @@ export const useStore = create<State>()((set) => ({
       save(BOLDER_KEY, bolder ? 'on' : 'off');
       return { bolder };
     }),
+
+  setColorPreset: (id) => set((st) => updateColors(st, { preset: id, colors: presetColors(st.theme, id) })),
+
+  setColor: (key, hex) =>
+    set((st) => {
+      const cur = st.colors[st.theme];
+      return updateColors(st, { ...cur, colors: { ...cur.colors, [key]: hex.toLowerCase() } });
+    }),
+
+  resetColors: () => set((st) => updateColors(st, defaultChoice(st.theme))),
 }));
+
+/** Saves and applies new colors for the current theme. The default is saved as nothing. */
+function updateColors(st: State, choice: ColorChoice): Pick<State, 'colors'> {
+  const key = colorsKey(st.theme);
+  const isDefault = matchingPreset(st.theme, choice) === 'default';
+  if (isDefault) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // no storage
+    }
+  } else save(key, JSON.stringify(choice));
+  applyColors(st.theme, choice);
+  return { colors: { ...st.colors, [st.theme]: choice } };
+}
 
 type Slice = Pick<State, 'approvals' | 'sessions' | 'projects'>;
 
