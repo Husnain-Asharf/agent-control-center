@@ -72,7 +72,21 @@ pub async fn run_server(cfg: DaemonConfig) -> anyhow::Result<ServerHandle> {
     let shared = Arc::new(Shared::new(cfg, events, daemon));
     let (stop, stopped) = oneshot::channel();
     let accept = tokio::spawn(accept_loop(listener, shared.clone(), stopped));
+    tokio::spawn(watch_branches(Arc::downgrade(&shared)));
     Ok(ServerHandle { stop, accept, shared, _lock: lock })
+}
+
+/// How often the branches of running sessions are reread.
+const BRANCH_POLL: Duration = Duration::from_secs(2);
+
+/// Rereads the running sessions' branches every [`BRANCH_POLL`], until the
+/// daemon is dropped. Reading a branch is a small file read, not a git run.
+async fn watch_branches(shared: std::sync::Weak<Shared>) {
+    loop {
+        tokio::time::sleep(BRANCH_POLL).await;
+        let Some(shared) = shared.upgrade() else { return };
+        shared.state.lock().await.refresh_branches();
+    }
 }
 
 /// Takes the data dir's lock, an exclusive non-blocking lock on the file

@@ -1092,16 +1092,40 @@ impl Daemon {
         }
     }
 
-    /// Reads the branch of a project-mode session's folder, which a session
-    /// or the user may have switched, and shows it on every session there.
+    /// Reads the branch of a session's folder, which the session or the user
+    /// may have switched. In the project folder it is shown on every session
+    /// there. A folder that is gone keeps the branch it showed last.
     fn refresh_branch(&mut self, session_id: &str) {
         let Some(entry) = self.sessions.get(session_id) else { return };
-        if entry.session.mode != SessionMode::Project {
+        let folder = PathBuf::from(&entry.session.worktree);
+        let Some(head) = worktree::read_head(&folder) else { return };
+        let branch = head_name(Some(head));
+        match entry.session.mode {
+            SessionMode::Project => self.folder_branch_changed(&folder, &branch),
+            SessionMode::Worktree => {
+                if entry.session.branch != branch {
+                    if let Some(entry) = self.sessions.get_mut(session_id) {
+                        entry.session.branch = branch;
+                        let session = entry.session.clone();
+                        self.publish(&session);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rereads the branch of every running session's folder, so a switch made
+    /// outside the session (in the user's terminal) shows without waiting for
+    /// the session's next hook.
+    pub(crate) fn refresh_branches(&mut self) {
+        if self.shutting_down {
             return;
         }
-        let folder = PathBuf::from(&entry.session.worktree);
-        let branch = head_name(worktree::read_head(&folder));
-        self.folder_branch_changed(&folder, &branch);
+        let mut running: Vec<String> = self.sessions.values().filter(|e| e.live.is_some()).map(|e| e.session.id.clone()).collect();
+        running.sort();
+        for id in running {
+            self.refresh_branch(&id);
+        }
     }
 
     fn folder_branch_changed(&mut self, folder: &Path, branch: &str) {

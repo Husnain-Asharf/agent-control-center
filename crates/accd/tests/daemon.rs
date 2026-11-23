@@ -2024,3 +2024,20 @@ async fn branch_answers_fit_branch_questions_only() {
     assert_eq!(hook_reply(&mut hk).await.stdout, Some(permission_reply(true, None)));
     stop(server).await;
 }
+
+#[tokio::test]
+async fn a_branch_switched_outside_the_session_shows_without_a_hook() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let folder = start_project_session(&mut app, &h.repo, "Look around").await;
+    let own = start_session(&mut app, &h.repo, "Fix the bug").await;
+
+    git(&h.repo, &["switch", "-q", "-c", "mine"]);
+    git(Path::new(&own.worktree), &["switch", "-q", "-c", "renamed"]);
+    let shown = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == folder.id && u.branch == "mine"));
+    assert!(matches!(shown.await, DaemonEvent::SessionUpdated(_)));
+    let shown = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == own.id && u.branch == "renamed"));
+    assert!(matches!(shown.await, DaemonEvent::SessionUpdated(_)));
+    stop(server).await;
+}
