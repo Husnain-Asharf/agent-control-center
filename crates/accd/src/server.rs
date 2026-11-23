@@ -364,6 +364,11 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
                 PreToolOutcome::Protected => return protected_approval(shared, session_id, tool, summary, input, conn).await,
                 PreToolOutcome::Branch { id, answer, protected } => (id, answer, protected),
             };
+            // A yes allows the call by itself only for a file edit in the
+            // session's folder, which is what the card showed. A command
+            // (`git commit && git push`) still goes through the approvals.
+            let folder = shared.state.lock().await.session_folder(session_id);
+            let allow_alone = folder.is_some_and(|f| crate::daemon::is_edit_tool(&tool) && crate::daemon::edits_inside(&input, &f));
             let yes = match wait_for_answer(shared, &approval_id, answer, conn).await? {
                 Waited::Answered(Answer::Decided(Decision::Deny)) => return Some(pre_tool("deny", Some(APPROVAL_DENIED))),
                 Waited::Expired => return Some(pre_tool("deny", Some(APPROVAL_EXPIRED))),
@@ -374,7 +379,7 @@ async fn hook(shared: &Shared, session_id: &str, payload: &Value, conn: &mut Rea
             if protected {
                 return protected_approval(shared, session_id, tool, summary, input, conn).await;
             }
-            return Some(if yes { pre_tool("allow", None) } else { silent });
+            return Some(if yes && allow_alone { pre_tool("allow", None) } else { silent });
         }
         HookEffect::Nothing => return Some(silent),
     };

@@ -128,6 +128,11 @@ pub fn create_worktree(repo: &RepoInfo, slug: &str) -> Result<(PathBuf, String),
         }
         n += 1;
     };
+    if run_git(&repo.root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Err(WorktreeError::Git(
+            "This repository has no commits yet, so it has nothing to make a worktree from. Make a first commit, or start the session in the project folder.".into(),
+        ));
+    }
     ensure_exclude(&repo.root)?;
     let path_str = path.to_string_lossy().into_owned();
     run_git(&repo.root, &["worktree", "add", "-b", &branch, &path_str, "HEAD"])
@@ -159,6 +164,26 @@ pub fn read_head(folder: &Path) -> Option<Head> {
         Some(branch) if !branch.is_empty() => Head::Branch(branch.to_string()),
         _ => Head::Detached,
     })
+}
+
+/// The branch `origin/HEAD` points to, read from git's files: the remote's
+/// default branch, which can change after the project was added (a rename
+/// from master to main). `None` when the repo has no such ref.
+pub fn origin_head(folder: &Path) -> Option<String> {
+    let dot_git = folder.join(".git");
+    let common = if dot_git.is_dir() {
+        dot_git
+    } else {
+        // A linked worktree: its gitdir has a `commondir` file pointing to the main one.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        let gitdir = if gitdir.is_absolute() { gitdir } else { folder.join(gitdir) };
+        let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+        let common = PathBuf::from(common.trim());
+        if common.is_absolute() { common } else { gitdir.join(common) }
+    };
+    let text = std::fs::read_to_string(common.join("refs/remotes/origin/HEAD")).ok()?;
+    text.trim().strip_prefix("ref: refs/remotes/origin/").filter(|b| !b.is_empty()).map(str::to_string)
 }
 
 /// A `core.hooksPath` with no hooks in it, so git runs none.
@@ -375,6 +400,29 @@ mod tests {
         git(&empty, &["init", "-q", "-b", "main"]);
         assert_eq!(make_branch_in_place(&empty, "first").unwrap(), "agent/first");
         assert_eq!(read_head(&empty), Some(Head::Branch("agent/first".into())));
+    }
+
+    #[test]
+    fn origin_head_names_the_remote_default_branch() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("proj");
+        init_repo(&dir);
+        assert_eq!(origin_head(&dir), None);
+        git(&dir, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        git(&dir, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+        assert_eq!(origin_head(&dir).as_deref(), Some("trunk"));
+        let (path, _) = create_worktree(&inspect_repo(&dir).unwrap(), "fix").unwrap();
+        assert_eq!(origin_head(&path).as_deref(), Some("trunk"));
+    }
+
+    #[test]
+    fn a_repo_with_no_commit_gets_a_clear_worktree_error() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let err = create_worktree(&inspect_repo(&dir).unwrap(), "fix").unwrap_err().to_string();
+        assert!(err.contains("no commits yet"), "{err}");
     }
 
     #[test]

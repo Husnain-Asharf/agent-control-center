@@ -2088,3 +2088,26 @@ async fn the_status_line_reports_usage_and_plan_limits() {
     assert_eq!(snap.plan_usage.and_then(|p| p.five_hour).map(|w| w.used_percentage), Some(12.0));
     stop(server).await;
 }
+
+#[tokio::test]
+async fn a_yes_to_the_branch_question_does_not_allow_a_command_by_itself() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Ship it").await;
+
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Bash", json!({"command": "git commit -am x && git push --force"}))).await;
+    let q = app.approval_created().await;
+    assert_eq!(q.kind, ApprovalKind::Branch);
+    let (code, _) = app.call_err(Request::ApprovalDecide { approval_id: q.id.clone(), decision: Decision::AllowOnce }).await;
+    assert_eq!(code, "bad_request", "a plain allow does not answer a branch question");
+    app.call(Request::ApprovalDecide { approval_id: q.id, decision: Decision::MakeBranch }).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT, "the command still goes through the normal approvals");
+
+    // An edit outside the project folder asks no branch question at all.
+    git(&h.repo, &["switch", "-q", "main"]);
+    let outside = h.tmp.path().join("elsewhere.txt").to_string_lossy().into_owned();
+    let mut hk = hook(&h.socket(), &s.id, pre_tool("Edit", json!({"file_path": outside}))).await;
+    assert_eq!(hook_reply(&mut hk).await, SILENT);
+    stop(server).await;
+}

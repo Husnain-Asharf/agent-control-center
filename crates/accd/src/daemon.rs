@@ -303,6 +303,9 @@ pub(crate) struct Shared {
     /// could not be read.
     #[cfg(unix)]
     login_path: OnceCell<Option<String>>,
+    /// Held while a branch is made, so two answers at once cannot both see
+    /// the base branch and make two branches.
+    branching: Mutex<()>,
 }
 
 /// A freshly spawned agent whose output pump has not started yet.
@@ -320,6 +323,7 @@ impl Shared {
             state: Mutex::new(daemon),
             #[cfg(unix)]
             login_path: OnceCell::new(),
+            branching: Mutex::new(()),
         }
     }
 
@@ -487,6 +491,7 @@ impl Shared {
     /// When the folder is no longer on the base branch (another answer made a
     /// branch, or the user switched), no second branch is made.
     pub(crate) async fn approval_decide(self: &Arc<Self>, approval_id: &str, decision: Decision) -> Result<Decided, ApiError> {
+        let _branching = self.branching.lock().await;
         if decision == Decision::MakeBranch {
             let target = self.state.lock().await.branch_target(approval_id);
             if let Some((folder, slug, base)) = target {
@@ -1032,6 +1037,10 @@ impl Daemon {
         text
     }
 
+    pub(crate) fn session_folder(&self, session_id: &str) -> Option<PathBuf> {
+        self.sessions.get(session_id).map(|e| PathBuf::from(&e.session.worktree))
+    }
+
     fn set_hook_dirs(&mut self, session_id: &str, dirs: Vec<PathBuf>) {
         if let Some(entry) = self.sessions.get_mut(session_id) {
             entry.hook_dirs = dirs;
@@ -1054,11 +1063,13 @@ impl Daemon {
         let protected = request_is_protected(summary, input, &folder, PLATFORM) || touches_dirs(summary, input, &entry.hook_dirs, &folder);
         let base = self.project(&entry.session.project_id).map(|p| p.base_branch);
         let on_base = match worktree::read_head(&folder) {
-            Some(Head::Branch(branch)) => base.is_some_and(|base| base == branch),
+            Some(Head::Branch(branch)) => {
+                base.is_some_and(|base| base == branch) || worktree::origin_head(&folder).is_some_and(|b| b == branch)
+            }
             Some(Head::Detached) => true,
             None => false,
         };
-        if on_base && !entry.session.stay_on_base && changes_files(tool, input) {
+        if on_base && !entry.session.stay_on_base && changes_files(tool, input, &folder) {
             return self.ask_branch(session_id, tool, summary, input, protected);
         }
         if protected {
@@ -1111,6 +1122,16 @@ impl Daemon {
     /// and the other branch questions there are settled by it, so their
     /// calls go on through the normal approvals.
     fn branch_made(&mut self, folder: &Path, branch: &str, answered: &str) {
+        let moved: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|e| e.session.mode == SessionMode::Project && Path::new(&e.session.worktree) == folder)
+            .map(|e| e.session.title.clone())
+            .collect();
+        if let Some(session) = self.pending.get(answered).and_then(|p| self.sessions.get(&p.approval.session_id)) {
+            let s = session.session.clone();
+            self.session_event(&s, "branch.made", "user", json!({ "branch": branch, "folder": folder, "sessions": moved }));
+        }
         self.folder_branch_changed(folder, branch);
         let mut settled: Vec<(i64, String)> = self
             .pending
@@ -1216,6 +1237,9 @@ impl Daemon {
         if kind == Some(ApprovalKind::Permission) && matches!(decision, Decision::MakeBranch | Decision::StayOnBase) {
             return Err(ApiError::bad_request("Make branch and Stay on the base branch answer a branch question only."));
         }
+        if kind == Some(ApprovalKind::Branch) && matches!(decision, Decision::AllowOnce | Decision::AllowAlways) {
+            return Err(ApiError::bad_request("A branch question takes Make branch, Allow on the base branch or Deny."));
+        }
         let state = if decision == Decision::Deny { ApprovalState::Denied } else { ApprovalState::Allowed };
         let Some((approval, pending)) = self.take_pending(approval_id, state, Some("user")) else {
             return match self.resolved.contains(approval_id) {
@@ -1245,7 +1269,7 @@ impl Daemon {
             extra["once_only"] = json!(reason);
         }
         self.approval_event(&approval, "approval.decided", "user", extra);
-        if approval.kind == ApprovalKind::Branch && matches!(decision, Decision::StayOnBase | Decision::AllowAlways) {
+        if approval.kind == ApprovalKind::Branch && decision == Decision::StayOnBase {
             self.set_stay_on_base(&approval.session_id);
         }
         // The hook may be gone already; then nobody waits for the reply.
@@ -1308,9 +1332,9 @@ fn head_name(head: Option<Head>) -> String {
 
 /// Whether a call changes files: a file edit, or a Bash or PowerShell
 /// command that makes a commit on the current branch.
-fn changes_files(tool: &str, input: &Value) -> bool {
+fn changes_files(tool: &str, input: &Value, folder: &Path) -> bool {
     if EDIT_TOOLS.contains(&tool) {
-        return true;
+        return edits_inside(input, folder);
     }
     let Some(command) = input.get("command").and_then(Value::as_str) else { return false };
     match tool {
@@ -1322,6 +1346,23 @@ fn changes_files(tool: &str, input: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+pub(crate) fn is_edit_tool(tool: &str) -> bool {
+    EDIT_TOOLS.contains(&tool)
+}
+
+/// Whether every path of a file edit is in `folder`. Only such an edit is
+/// one a yes to the branch question may allow by itself; anything else goes
+/// on through the normal approvals.
+pub(crate) fn edits_inside(input: &Value, folder: &Path) -> bool {
+    let mut paths = PATH_FIELDS.iter().filter_map(|field| input.get(field).and_then(Value::as_str)).peekable();
+    paths.peek().is_some()
+        && paths.all(|path| {
+            let path = Path::new(path);
+            let path = if path.is_absolute() { path.to_path_buf() } else { folder.join(path) };
+            is_inside(&path, folder, PLATFORM) && !in_worktrees_dir(&path, folder, PLATFORM)
+        })
 }
 
 /// Whether any git command in `command` has a subcommand that commits on
@@ -3871,14 +3912,18 @@ mod tests {
 
     #[test]
     fn file_edits_and_commits_change_files() {
+        let folder = Path::new(W);
+        let inside = folder.join("a.rs").to_string_lossy().into_owned();
+        let outside = if cfg!(windows) { r"C:\Users\x\.zshrc" } else { "/Users/x/.zshrc" };
         for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
-            assert!(changes_files(tool, &json!({ "file_path": "/r/a.rs" })), "{tool}");
+            assert!(changes_files(tool, &json!({ "file_path": inside }), folder), "{tool}");
         }
-        assert!(changes_files("Bash", &json!({ "command": "git add . && git commit -m x" })));
-        assert!(changes_files("PowerShell", &json!({ "command": "git commit -m x" })));
-        assert!(!changes_files("Bash", &json!({ "command": "ls" })));
-        assert!(!changes_files("Read", &json!({ "file_path": "/r/a.rs" })));
-        assert!(!changes_files("Bash", &json!({})));
+        assert!(!changes_files("Edit", &json!({ "file_path": outside }), folder), "an edit outside the folder");
+        assert!(changes_files("Bash", &json!({ "command": "git add . && git commit -m x" }), folder));
+        assert!(changes_files("PowerShell", &json!({ "command": "git commit -m x" }), folder));
+        assert!(!changes_files("Bash", &json!({ "command": "ls" }), folder));
+        assert!(!changes_files("Read", &json!({ "file_path": inside }), folder));
+        assert!(!changes_files("Bash", &json!({}), folder));
     }
 
     #[test]
