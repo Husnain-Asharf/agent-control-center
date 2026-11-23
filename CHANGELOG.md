@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-24
+
+Usage numbers, more Settings, and fixes from testing 0.4.0.
+
+### Added
+
+- Usage on the Overview: the Claude plan's 5-hour and weekly use with when
+  each resets, each project's cost, app data and database size, and the
+  memory sessions use. Each session shows its cost, how full its context is,
+  lines changed, model, memory and disk. The numbers come from Claude Code's
+  status line, so the line at the bottom of an app session's terminal is the
+  app's.
+- A Coordination view on the project page: the sessions sharing the project
+  folder, the files each changed in the last 2 hours, and the files two
+  sessions both changed. A session in a shared folder is told about the
+  others when it starts, and to split the work through Claude Code's
+  messages between sessions.
+- Remove a stopped session from the app, and with its own worktree, also
+  its worktree and branch when git can do it without losing work. Remove a
+  project from the app. Folders and history stay.
+- Settings: a color editor with presets (Default, High contrast, Warm, Blue)
+  and custom colors for each theme, and a Glass style (window vibrancy on
+  macOS, translucent panels on Windows and Linux).
+
+### Fixed
+
+- A yes to the branch question no longer lets a whole command through:
+  `git commit && git push` still goes through the approvals. Edits outside
+  the project folder ask no branch question.
+- "Allow once" in a toast or on the Overview no longer answers a branch
+  question.
+- The base branch also counts the remote's current default branch.
+- A branch switched outside a session shows in its header within 2 seconds.
+- Restarting a session whose folder was deleted says so instead of hanging.
+- A repo with no commits gets a clear message for a separate worktree.
+- At large text sizes on a narrow window, the zoom stops where the layout
+  still fits.
+- "Needs you" jumps to a failed session when no approval waits, a banner
+  shows when the daemon is not connected, and text that still said every
+  session gets its own worktree is updated.
+
 ## [0.4.0] - 2026-11-23
 
 Sessions in the project folder, a Settings screen, and fixes from the first
@@ -185,6 +226,7 @@ First public release.
 - Worktrees and `agent/*` branches are not removed automatically.
 - Local only and macOS only.
 
+[0.5.0]: ../../releases/tag/v0.5.0
 [0.4.0]: ../../releases/tag/v0.4.0
 [0.3.1]: ../../releases/tag/v0.3.1
 [0.3.0]: ../../releases/tag/v0.3.0

@@ -1,6 +1,6 @@
 {
   "name": "agent-control-center",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "A desktop app for macOS, Linux and Windows to run and supervise Claude Code sessions, with git worktrees and tool-call approvals.",
   "license": "MIT",
