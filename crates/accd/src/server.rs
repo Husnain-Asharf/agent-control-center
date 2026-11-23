@@ -289,6 +289,12 @@ async fn dispatch(
         }
         Request::SessionStop { session_id } => to_json(&shared.state.lock().await.stop_session(&session_id)?),
         Request::SessionRestart { session_id } => to_json(&shared.session_restart(&session_id).await?),
+        Request::SessionRemove { session_id, remove_worktree } => to_json(&shared.session_remove(&session_id, remove_worktree).await?),
+        Request::ProjectRemove { project_id } => {
+            shared.project_remove(&project_id).await?;
+            json!({})
+        }
+        Request::Stats => to_json(&shared.stats().await?),
         Request::ApprovalDecide { approval_id, decision } => match shared.approval_decide(&approval_id, decision).await? {
             Decided::Resolved(approval) => to_json(&approval),
             Decided::AlreadyResolved => json!({ "already_resolved": true }),

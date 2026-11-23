@@ -14,7 +14,7 @@ use crate::store::{AllowRule, NewEvent, Store};
 use crate::worktree::{self, Head, RepoInfo, WorktreeError};
 use acc_protocol::{
     Approval, ApprovalKind, ApprovalState, DaemonEvent, Decision, EventRecord, PlanUsage, Project, Session, SessionMode,
-    SessionStatus, SessionUsage, Snapshot, StatusChange,
+    SessionRemoved, SessionStats, SessionStatus, SessionUsage, Snapshot, Stats, StatusChange,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -306,6 +306,9 @@ pub(crate) struct Shared {
     /// Held while a branch is made, so two answers at once cannot both see
     /// the base branch and make two branches.
     branching: Mutex<()>,
+    /// Worktree sizes with when they were measured, so the stats poll does
+    /// not walk a big folder every few seconds.
+    folder_sizes: std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, Option<u64>)>>,
 }
 
 /// A freshly spawned agent whose output pump has not started yet.
@@ -324,7 +327,53 @@ impl Shared {
             #[cfg(unix)]
             login_path: OnceCell::new(),
             branching: Mutex::new(()),
+            folder_sizes: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Removes a session that is not running. See [`acc_protocol::Request::SessionRemove`].
+    pub(crate) async fn session_remove(&self, session_id: &str, remove_worktree: bool) -> Result<SessionRemoved, ApiError> {
+        let (session, root) = {
+            let state = self.state.lock().await;
+            let entry = state.entry(session_id)?;
+            if entry.live.is_some() {
+                return Err(ApiError::bad_request("Stop the session before you remove it."));
+            }
+            let root = state.project(&entry.session.project_id).map(|p| PathBuf::from(p.path));
+            (entry.session.clone(), root)
+        };
+        let mut result = SessionRemoved::default();
+        if remove_worktree && session.mode == SessionMode::Worktree {
+            if let Some(root) = root {
+                let (worktree, branch) = (PathBuf::from(&session.worktree), session.branch.clone());
+                let (w, b, kept) = blocking(move || worktree::remove_worktree_and_branch(&root, &worktree, &branch)).await?;
+                result = SessionRemoved { worktree_removed: w, branch_removed: b, kept };
+            }
+        }
+        self.state.lock().await.forget_session(session_id);
+        let _ = std::fs::remove_dir_all(self.cfg.paths.session_dir(session_id));
+        Ok(result)
+    }
+
+    /// Removes a project with no running session, with its sessions and rules.
+    pub(crate) async fn project_remove(&self, project_id: &str) -> Result<(), ApiError> {
+        let ids = self.state.lock().await.forget_project(project_id)?;
+        for id in ids {
+            let _ = std::fs::remove_dir_all(self.cfg.paths.session_dir(&id));
+        }
+        Ok(())
+    }
+
+    /// Memory and disk use of the sessions and of the app's data.
+    pub(crate) async fn stats(&self) -> Result<Stats, ApiError> {
+        let rows = self.state.lock().await.stats_rows();
+        let paths = self.cfg.paths.clone();
+        let cached: HashMap<PathBuf, (std::time::Instant, Option<u64>)> = self.folder_sizes.lock().map(|m| m.clone()).unwrap_or_default();
+        let (stats, measured) = blocking(move || measure(rows, &paths, cached)).await?;
+        if let Ok(mut sizes) = self.folder_sizes.lock() {
+            sizes.extend(measured);
+        }
+        Ok(stats)
     }
 
     /// The PATH for an agent whose `claude` is `claude` (`None` while it is
@@ -1041,6 +1090,60 @@ impl Daemon {
         self.sessions.get(session_id).map(|e| PathBuf::from(&e.session.worktree))
     }
 
+    /// Drops a session from the app and the store. It must not be running.
+    fn forget_session(&mut self, session_id: &str) {
+        let pending: Vec<String> = self.pending.values().filter(|p| p.approval.session_id == session_id).map(|p| p.approval.id.clone()).collect();
+        for id in pending {
+            self.cancel(&id);
+        }
+        if let Err(e) = self.store.delete_session(session_id) {
+            eprintln!("accd: could not delete session {session_id}: {e:#}");
+        }
+        if self.sessions.remove(session_id).is_some() {
+            self.emit(DaemonEvent::SessionRemoved { session_id: session_id.to_string() });
+        }
+    }
+
+    /// Drops a project and its sessions. Fails while one of them runs.
+    fn forget_project(&mut self, project_id: &str) -> Result<Vec<String>, ApiError> {
+        if self.project(project_id).is_none() {
+            return Err(ApiError::not_found("Project not found."));
+        }
+        let mut ids: Vec<String> =
+            self.sessions.values().filter(|e| e.session.project_id == project_id).map(|e| e.session.id.clone()).collect();
+        ids.sort();
+        if ids.iter().any(|id| self.sessions.get(id).is_some_and(|e| e.live.is_some())) {
+            return Err(ApiError::bad_request("Stop the project's running sessions before you remove it."));
+        }
+        for id in &ids {
+            self.forget_session(id);
+        }
+        if let Err(e) = self.store.delete_project(project_id) {
+            eprintln!("accd: could not delete project {project_id}: {e:#}");
+        }
+        self.projects.retain(|p| p.id != project_id);
+        self.emit(DaemonEvent::ProjectRemoved { project_id: project_id.to_string() });
+        Ok(ids)
+    }
+
+    /// What [`Shared::stats`] measures for each session.
+    fn stats_rows(&self) -> Vec<StatsRow> {
+        let mut rows: Vec<StatsRow> = self
+            .sessions
+            .values()
+            .map(|e| StatsRow {
+                session_id: e.session.id.clone(),
+                #[cfg(unix)]
+                pid: e.live.as_ref().and_then(|l| l.pty.pid()),
+                scrollback_bytes: e.live.as_ref().map(|l| l.pty.scrollback().len()).unwrap_or(e.scrollback.len()) as u64,
+                folder: PathBuf::from(&e.session.worktree),
+                own_folder: e.session.mode == SessionMode::Worktree,
+            })
+            .collect();
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        rows
+    }
+
     fn set_hook_dirs(&mut self, session_id: &str, dirs: Vec<PathBuf>) {
         if let Some(entry) = self.sessions.get_mut(session_id) {
             entry.hook_dirs = dirs;
@@ -1409,6 +1512,136 @@ fn touches_dirs(summary: &str, input: &Value, dirs: &[PathBuf], folder: &Path) -
         let relative = dir.strip_prefix(folder).ok().map(|r| r.to_string_lossy().to_lowercase().replace('\\', "/"));
         in_field || lower.contains(&full) || relative.is_some_and(|r| !r.is_empty() && lower.contains(&r))
     })
+}
+
+struct StatsRow {
+    session_id: String,
+    #[cfg(unix)]
+    pid: Option<u32>,
+    scrollback_bytes: u64,
+    folder: PathBuf,
+    own_folder: bool,
+}
+
+/// How long a measured worktree size is reused.
+const FOLDER_SIZE_TTL: Duration = Duration::from_secs(120);
+
+/// Measures memory and disk for [`Shared::stats`], off the runtime threads.
+/// Returns the stats and the worktree sizes it measured anew.
+fn measure(
+    rows: Vec<StatsRow>,
+    paths: &Paths,
+    cached: HashMap<PathBuf, (std::time::Instant, Option<u64>)>,
+) -> (Stats, Vec<(PathBuf, (std::time::Instant, Option<u64>))>) {
+    #[cfg(unix)]
+    let table = process_table();
+    let home = dirs::home_dir();
+    let mut fresh = Vec::new();
+    let sessions = rows
+        .into_iter()
+        .map(|row| {
+            #[cfg(unix)]
+            let (memory_bytes, processes) = match row.pid {
+                Some(pid) => {
+                    let (rss, count) = tree_memory(&table, pid);
+                    (Some(rss), count)
+                }
+                None => (None, 0),
+            };
+            #[cfg(windows)]
+            let (memory_bytes, processes) = (None, 0);
+            let transcript_bytes = home.as_ref().and_then(|h| file_size(&transcript_path(h, &row.folder, &row.session_id)));
+            let folder_bytes = if row.own_folder {
+                match cached.get(&row.folder) {
+                    Some((at, size)) if at.elapsed() < FOLDER_SIZE_TTL => *size,
+                    _ => {
+                        let size = folder_size(&row.folder);
+                        fresh.push((row.folder.clone(), (std::time::Instant::now(), size)));
+                        size
+                    }
+                }
+            } else {
+                None
+            };
+            SessionStats { session_id: row.session_id, memory_bytes, processes, scrollback_bytes: row.scrollback_bytes, transcript_bytes, folder_bytes }
+        })
+        .collect();
+    let db_bytes = ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|suffix| file_size(&PathBuf::from(format!("{}{suffix}", paths.db.display()))))
+        .sum();
+    let data_bytes = folder_size(&paths.data).unwrap_or(db_bytes);
+    (Stats { db_bytes, data_bytes, sessions }, fresh)
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len())
+}
+
+/// Claude Code keeps a session's conversation in
+/// `~/.claude/projects/<folder with every other character as ->/<id>.jsonl`.
+fn transcript_path(home: &Path, folder: &Path, session_id: &str) -> PathBuf {
+    let slug: String = folder.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    home.join(".claude").join("projects").join(slug).join(format!("{session_id}.jsonl"))
+}
+
+/// The bytes of the files under `dir`, not following links. `None` if it
+/// cannot be read at all.
+fn folder_size(dir: &Path) -> Option<u64> {
+    let meta = std::fs::symlink_metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return Some(meta.len());
+    }
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total += meta.len();
+            }
+        }
+    }
+    Some(total)
+}
+
+/// Every process with its parent and resident memory in bytes, from `ps`.
+#[cfg(unix)]
+fn process_table() -> Vec<(u32, u32, u64)> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,rss="]).output() else { return Vec::new() };
+    parse_process_table(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(unix)]
+fn parse_process_table(text: &str) -> Vec<(u32, u32, u64)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse().ok()?;
+            let ppid = words.next()?.parse().ok()?;
+            let rss_kib: u64 = words.next()?.parse().ok()?;
+            Some((pid, ppid, rss_kib * 1024))
+        })
+        .collect()
+}
+
+/// The memory of `root` and all its descendants, and how many they are.
+#[cfg(unix)]
+fn tree_memory(table: &[(u32, u32, u64)], root: u32) -> (u64, u32) {
+    let mut total = 0;
+    let mut count = 0;
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if let Some((_, _, rss)) = table.iter().find(|(p, _, _)| *p == pid) {
+            total += rss;
+            count += 1;
+        }
+        stack.extend(table.iter().filter(|(_, ppid, _)| *ppid == pid).map(|(p, _, _)| *p));
+    }
+    (total, count)
 }
 
 fn same_usage(a: &SessionUsage, b: &SessionUsage) -> bool {
@@ -3975,6 +4208,20 @@ mod tests {
         for path in [".gitignore", ".github/workflows/ci.yml", ".gitattributes", "src/credentials.rs", "keys.json", "git/x"] {
             assert!(!touches_protected_path(path, Path::new(W), PLATFORM), "{path}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_adds_up_the_process_tree() {
+        let table = parse_process_table("  10   1  100\n  11  10  200\n  12  11   50\n  13   1  999\nbad line\n");
+        assert_eq!(tree_memory(&table, 10), (350 * 1024, 3));
+        assert_eq!(tree_memory(&table, 42), (0, 0));
+    }
+
+    #[test]
+    fn transcripts_are_where_claude_code_keeps_them() {
+        let path = transcript_path(Path::new("/home/x"), Path::new("/my repo/.worktrees/fix"), "abc");
+        assert_eq!(path, Path::new("/home/x/.claude/projects/-my-repo--worktrees-fix/abc.jsonl"));
     }
 
     #[test]

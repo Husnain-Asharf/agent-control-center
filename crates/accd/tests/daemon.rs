@@ -2111,3 +2111,70 @@ async fn a_yes_to_the_branch_question_does_not_allow_a_command_by_itself() {
     assert_eq!(hook_reply(&mut hk).await, SILENT);
     stop(server).await;
 }
+
+#[tokio::test]
+async fn a_stopped_session_can_be_removed_with_its_worktree() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Fix the bug").await;
+
+    let (code, message) = app.call_err(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await;
+    assert_eq!(code, "bad_request", "{message}");
+    app.call(Request::SessionStop { session_id: s.id.clone() }).await;
+    app.status(&s.id, SessionStatus::Stopped).await;
+
+    let removed: acc_protocol::SessionRemoved =
+        from(app.call(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await);
+    assert_eq!((removed.worktree_removed, removed.branch_removed), (true, true), "{:?}", removed.kept);
+    assert!(!Path::new(&s.worktree).exists());
+    assert_eq!(git(&h.repo, &["branch", "--list", &s.branch]), "");
+    let event = app.event(|e| matches!(e, DaemonEvent::SessionRemoved { session_id } if *session_id == s.id));
+    assert!(matches!(event.await, DaemonEvent::SessionRemoved { .. }));
+    let snap: Snapshot = from(app.call(Request::Snapshot).await);
+    assert!(snap.sessions.is_empty());
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn a_worktree_with_changes_is_kept_when_its_session_is_removed() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Fix the bug").await;
+    app.call(Request::SessionStop { session_id: s.id.clone() }).await;
+    app.status(&s.id, SessionStatus::Stopped).await;
+    std::fs::write(Path::new(&s.worktree).join("README.md"), "unsaved work\n").unwrap();
+
+    let removed: acc_protocol::SessionRemoved =
+        from(app.call(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await);
+    assert!(!removed.worktree_removed && removed.kept.is_some());
+    assert!(Path::new(&s.worktree).join("README.md").exists(), "the work is kept");
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn a_project_is_removed_with_its_sessions_and_stats_measure_the_rest() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Look around").await;
+
+    let stats: acc_protocol::Stats = from(app.call(Request::Stats).await);
+    assert!(stats.db_bytes > 0 && stats.data_bytes >= stats.db_bytes);
+    let row = stats.sessions.iter().find(|r| r.session_id == s.id).unwrap();
+    assert_eq!(row.folder_bytes, None, "a session in the project folder has no folder of its own");
+    #[cfg(unix)]
+    assert!(row.memory_bytes.unwrap_or(0) > 0 && row.processes >= 1, "{row:?}");
+
+    let project = add_project(&mut app, &h.repo).await;
+    let (code, _) = app.call_err(Request::ProjectRemove { project_id: project.id.clone() }).await;
+    assert_eq!(code, "bad_request", "a running session blocks it");
+    app.call(Request::SessionStop { session_id: s.id.clone() }).await;
+    app.status(&s.id, SessionStatus::Stopped).await;
+    app.call(Request::ProjectRemove { project_id: project.id.clone() }).await;
+    let snap: Snapshot = from(app.call(Request::Snapshot).await);
+    assert!(snap.projects.is_empty() && snap.sessions.is_empty());
+    assert!(h.repo.join("README.md").exists(), "the folder stays");
+    stop(server).await;
+}

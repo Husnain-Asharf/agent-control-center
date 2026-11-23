@@ -132,6 +132,23 @@ impl Store {
         self.load_all("SELECT data FROM sessions ORDER BY rowid")
     }
 
+    /// Deletes a session with its approvals and its events.
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM approvals WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Deletes a project with its rules and its project-level events. Its
+    /// sessions are deleted one by one first ([`Store::delete_session`]).
+    pub fn delete_project(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM rules WHERE project_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM events WHERE project_id = ?1 AND session_id IS NULL", params![id])?;
+        self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn upsert_approval(&self, a: &Approval) -> Result<()> {
         self.conn.execute(
             "INSERT INTO approvals (id, session_id, state, data) VALUES (?1, ?2, ?3, ?4)

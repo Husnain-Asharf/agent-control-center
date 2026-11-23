@@ -185,6 +185,19 @@ pub enum Request {
     SessionAttach { session_id: String },
     SessionStop { session_id: String },
     SessionRestart { session_id: String },
+    /// Removes a session that is not running from the app. With
+    /// `remove_worktree`, a worktree session's worktree and branch go too,
+    /// but only when git can remove them without losing work.
+    SessionRemove {
+        session_id: String,
+        #[serde(default)]
+        remove_worktree: bool,
+    },
+    /// Removes a project with no running session from the app, with its
+    /// sessions and rules. Its folder stays as it is.
+    ProjectRemove { project_id: String },
+    /// Memory and disk use of the sessions, and of the app's data.
+    Stats,
     ApprovalDecide { approval_id: String, decision: Decision },
     EventsList { session_id: Option<String>, limit: u32 },
     Hook { session_id: String, payload: serde_json::Value },
@@ -209,6 +222,42 @@ pub enum DaemonEvent {
     ProjectAdded(Project),
     EventAppended(EventRecord),
     PlanUsageUpdated(PlanUsage),
+    SessionRemoved { session_id: String },
+    ProjectRemoved { project_id: String },
+}
+
+/// What removing a session did.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct SessionRemoved {
+    pub worktree_removed: bool,
+    pub branch_removed: bool,
+    /// Why the worktree or the branch was kept, in git's words.
+    pub kept: Option<String>,
+}
+
+/// One session's use of memory and disk. `None` where it cannot be measured
+/// (memory on Windows, a folder that is not the session's own).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct SessionStats {
+    pub session_id: String,
+    /// Resident memory of Claude Code and everything it started.
+    pub memory_bytes: Option<u64>,
+    pub processes: u32,
+    /// Terminal output the daemon keeps in memory.
+    pub scrollback_bytes: u64,
+    /// Claude Code's conversation file.
+    pub transcript_bytes: Option<u64>,
+    /// The session's own worktree. `None` for a session in the project folder.
+    pub folder_bytes: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Stats {
+    /// `acc.db` with its write-ahead log.
+    pub db_bytes: u64,
+    /// The whole data folder, the database included.
+    pub data_bytes: u64,
+    pub sessions: Vec<SessionStats>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

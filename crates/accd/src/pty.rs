@@ -211,6 +211,12 @@ impl PtySession {
         })
     }
 
+    /// The agent's process id: the leader of its process group.
+    #[cfg(unix)]
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
         let mut w = self.writer.lock().unwrap();
         w.write_all(data).context("write to pty")?;

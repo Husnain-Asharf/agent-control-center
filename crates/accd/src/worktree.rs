@@ -186,6 +186,21 @@ pub fn origin_head(folder: &Path) -> Option<String> {
     text.trim().strip_prefix("ref: refs/remotes/origin/").filter(|b| !b.is_empty()).map(str::to_string)
 }
 
+/// Removes a session's worktree and then its branch, the way git allows
+/// without losing work: `git worktree remove` refuses a worktree with
+/// changes, and `git branch -d` keeps a branch that is not merged. Returns
+/// what went, and git's reason for what stayed.
+pub fn remove_worktree_and_branch(repo_root: &Path, worktree: &Path, branch: &str) -> (bool, bool, Option<String>) {
+    let path = worktree.to_string_lossy().into_owned();
+    if let Err(e) = run_git(repo_root, &["worktree", "remove", &path]) {
+        return (false, false, Some(e));
+    }
+    match run_git(repo_root, &["branch", "-d", branch]) {
+        Ok(_) => (true, true, None),
+        Err(e) => (true, false, Some(e)),
+    }
+}
+
 /// A `core.hooksPath` with no hooks in it, so git runs none.
 #[cfg(unix)]
 const NO_HOOKS: &str = "core.hooksPath=/dev/null";
