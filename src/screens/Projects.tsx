@@ -3,6 +3,7 @@ import { FleetLanes, RangeControl, byRank, useNow, type Range } from '../compone
 import { Icon } from '../components/Icon';
 import { Lamp } from '../components/Lamp';
 import { AddProjectDialog } from '../dialogs/AddProjectDialog';
+import { openNewSession } from '../dialogs/NewSessionDialog';
 import { monogram } from '../lib/format';
 import { needsYouForProject } from '../lib/needs';
 import { useRoute } from '../lib/route';
@@ -119,6 +120,13 @@ export function ProjectPage() {
               Base branch <code>{project.base_branch}</code>
             </span>
           </p>
+        </div>
+        <div className="head-actions">
+          <button className="btn btn--primary" type="button" onClick={openNewSession}>
+            <Icon name="plus" />
+            New session
+            <kbd className="kbd">N</kbd>
+          </button>
         </div>
       </div>
       <section className="block" aria-labelledby="live-h">
