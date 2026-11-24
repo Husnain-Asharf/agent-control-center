@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS samples (ts INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS samples_ts ON samples (ts);
+CREATE INDEX IF NOT EXISTS events_project_ts ON events (project_id, ts);
 CREATE TABLE IF NOT EXISTS rules (
     project_id TEXT NOT NULL,
     tool TEXT NOT NULL,
@@ -94,11 +95,17 @@ impl Store {
 
     /// Newest first.
     pub fn list_events(&self, session_id: Option<&str>, limit: u32) -> Result<Vec<EventRecord>> {
+        self.find_events(session_id, None, None, limit)
+    }
+
+    /// Events newest first, filtered by session, project and time when given.
+    pub fn find_events(&self, session_id: Option<&str>, project_id: Option<&str>, since: Option<i64>, limit: u32) -> Result<Vec<EventRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, ts, session_id, project_id, kind, actor, payload FROM events
-             WHERE (?1 IS NULL OR session_id = ?1) ORDER BY seq DESC LIMIT ?2",
+             WHERE (?1 IS NULL OR session_id = ?1) AND (?2 IS NULL OR project_id = ?2) AND (?3 IS NULL OR ts >= ?3)
+             ORDER BY seq DESC LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![session_id, limit], |r| {
+        let rows = stmt.query_map(params![session_id, project_id, since, limit], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get::<_, String>(6)?))
         })?;
         let mut out = Vec::new();
@@ -132,6 +139,17 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         self.load_all("SELECT data FROM sessions ORDER BY rowid")
+    }
+
+    /// Drops events and finished approvals older than `before`. Pending
+    /// approvals stay whatever their age.
+    pub fn prune(&self, before: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM events WHERE ts < ?1", params![before])?;
+        self.conn.execute(
+            "DELETE FROM approvals WHERE state != 'pending' AND CAST(json_extract(data, '$.created_at') AS INTEGER) < ?1",
+            params![before],
+        )?;
+        Ok(())
     }
 
     /// Keeps a usage sample and drops the ones older than `keep_since`.
@@ -252,7 +270,7 @@ mod tests {
     fn session(id: &str, status: SessionStatus) -> Session {
         Session {
             id: id.into(), project_id: "p1".into(), agent: "claude".into(), title: "t".into(), branch: "agent/x".into(),
-            worktree: "/w".into(), mode: SessionMode::Worktree, stay_on_base: false, usage: None, lead_id: None, status, status_since: 10, started_at: 5,
+            worktree: "/w".into(), mode: SessionMode::Worktree, stay_on_base: false, usage: None, lead_id: None, own_branch: None, first_started_at: None, status, status_since: 10, started_at: 5,
             ended_at: None, exit_code: None,
             history: vec![StatusChange { status: SessionStatus::Starting, at: 5 }],
         }

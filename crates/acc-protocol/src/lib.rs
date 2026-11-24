@@ -58,6 +58,13 @@ pub struct Session {
     /// The session that started this one as its helper.
     #[serde(default)]
     pub lead_id: Option<String>,
+    /// The branch the daemon made for this session (`Worktree` mode). Remove
+    /// deletes only this one, whatever the worktree is on later.
+    #[serde(default)]
+    pub own_branch: Option<String>,
+    /// When the session was first started. A restart keeps it; `started_at` is the run's.
+    #[serde(default)]
+    pub first_started_at: Option<i64>,
     pub status: SessionStatus,
     pub status_since: i64,
     pub started_at: i64,
@@ -225,7 +232,19 @@ pub enum Request {
     /// in the same folder, as a message from this one.
     SessionSend { from_session: String, to_session: String, text: String },
     ApprovalDecide { approval_id: String, decision: Decision },
-    EventsList { session_id: Option<String>, limit: u32 },
+    EventsList {
+        session_id: Option<String>,
+        limit: u32,
+        /// Only this project's events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        /// Only events at or after this time, in milliseconds since 1970.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<i64>,
+    },
+    /// Types `/compact` into an idle session whose input box the user has
+    /// not typed into since it went idle.
+    SessionCompact { session_id: String },
     Hook { session_id: String, payload: serde_json::Value },
 }
 

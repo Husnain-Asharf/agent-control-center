@@ -83,7 +83,13 @@ fn mcp_reply(session_id: &str, msg: &serde_json::Value) -> Option<serde_json::Va
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or_default();
     let result = match method {
         "initialize" => {
-            let version = msg.pointer("/params/protocolVersion").and_then(|v| v.as_str()).unwrap_or("2025-06-18");
+            if session_id.is_empty() {
+                return Some(serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "These tools only work in a session started by Agent Control Center (ACC_SESSION_ID is not set)."} }));
+            }
+            // Answer with the client's version when it is one this server speaks, else the newest one it does.
+            const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+            let asked = msg.pointer("/params/protocolVersion").and_then(|v| v.as_str()).unwrap_or_default();
+            let version = VERSIONS.iter().find(|v| **v == asked).copied().unwrap_or(VERSIONS[0]);
             serde_json::json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {}},
@@ -115,7 +121,14 @@ fn run_mcp() {
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+            let _ = writeln!(stdout, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"} }));
+            let _ = stdout.flush();
+            continue;
+        };
         if let Some(reply) = mcp_reply(&session_id, &msg) {
             let _ = writeln!(stdout, "{reply}");
             let _ = stdout.flush();

@@ -202,7 +202,10 @@ pub fn write_settings(dir: &Path, hook_bin: &Path) -> anyhow::Result<PathBuf> {
     // The session's own tools (start a helper, list and message the sessions
     // in its folder). Listing and messaging need no approval; starting a
     // helper asks, as any other tool does.
-    let permissions = json!({ "allow": ["mcp__acc__list_sessions", "mcp__acc__send_message"] });
+    // Starting a helper is allowed here because the daemon asks the user
+    // itself, in every permission mode; Claude Code's own ask is skipped so
+    // there is one question, not two.
+    let permissions = json!({ "allow": ["mcp__acc__list_sessions", "mcp__acc__send_message", "mcp__acc__start_helper"] });
     let mut status_line = hook_command(hook_bin);
     status_line["refreshInterval"] = json!(STATUS_REFRESH_SECS);
     let path = settings_path(dir);
@@ -303,7 +306,11 @@ pub fn launch_args(settings: &Path, session_id: &str, prompt: Option<&str>, mode
     args.extend(mcp_args(settings));
     args.extend(["--session-id".to_string(), session_id.to_string()]);
     args.extend(setting_sources(mode));
-    args.extend(prompt.map(str::to_string));
+    // After `--`, a prompt that starts with `-` stays a prompt.
+    if let Some(prompt) = prompt {
+        args.push("--".into());
+        args.push(prompt.into());
+    }
     args
 }
 
@@ -444,11 +451,11 @@ mod tests {
     fn launch_args_order() {
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Worktree),
-            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "Fix the bug"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "--", "Fix the bug"]
         );
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", Some("Fix the bug"), SessionMode::Project),
-            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "--setting-sources", "user,project", "Fix the bug"]
+            vec!["--settings", "/d/s.json", "--mcp-config", MCP, "--session-id", "abc", "--setting-sources", "user,project", "--", "Fix the bug"]
         );
         assert_eq!(
             launch_args(Path::new("/d/s.json"), "abc", None, SessionMode::Worktree),

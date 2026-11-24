@@ -190,11 +190,12 @@ pub fn origin_head(folder: &Path) -> Option<String> {
 /// without losing work: `git worktree remove` refuses a worktree with
 /// changes, and `git branch -d` keeps a branch that is not merged. Returns
 /// what went, and git's reason for what stayed.
-pub fn remove_worktree_and_branch(repo_root: &Path, worktree: &Path, branch: &str) -> (bool, bool, Option<String>) {
+pub fn remove_worktree_and_branch(repo_root: &Path, worktree: &Path, branch: Option<&str>) -> (bool, bool, Option<String>) {
     let path = worktree.to_string_lossy().into_owned();
     if let Err(e) = run_git(repo_root, &["worktree", "remove", &path]) {
         return (false, false, Some(e));
     }
+    let Some(branch) = branch else { return (true, false, None) };
     match run_git(repo_root, &["branch", "-d", branch]) {
         Ok(_) => (true, true, None),
         Err(e) => (true, false, Some(e)),
@@ -206,6 +207,40 @@ pub fn remove_worktree_and_branch(repo_root: &Path, worktree: &Path, branch: &st
 const NO_HOOKS: &str = "core.hooksPath=/dev/null";
 #[cfg(windows)]
 const NO_HOOKS: &str = "core.hooksPath=NUL";
+
+/// The git folder that holds a repo's refs: `.git`, or for a linked
+/// worktree the main one its `commondir` names.
+fn common_git_dir(folder: &Path) -> Option<PathBuf> {
+    let dot_git = folder.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let gitdir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() { gitdir } else { folder.join(gitdir) };
+    let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = PathBuf::from(common.trim());
+    Some(if common.is_absolute() { common } else { gitdir.join(common) })
+}
+
+/// [`free_branch`] from git's files, without running git, for callers that
+/// must not wait on a process: a loose ref or a line in `packed-refs` makes
+/// a name taken. Falls back to `agent/<slug>` when the refs cannot be read.
+pub fn free_branch_from_files(folder: &Path, slug: &str) -> String {
+    let Some(git) = common_git_dir(folder) else { return format!("agent/{slug}") };
+    let packed = std::fs::read_to_string(git.join("packed-refs")).unwrap_or_default();
+    let taken = |name: &str| {
+        git.join("refs").join("heads").join(name).exists() || packed.lines().any(|l| l.ends_with(&format!(" refs/heads/{name}")))
+    };
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("agent/{slug}") } else { format!("agent/{slug}-{n}") };
+        if !taken(&name) {
+            return name;
+        }
+        n += 1;
+    }
+}
 
 /// The first of `agent/<slug>`, `agent/<slug>-2`, `-3` that is not a branch
 /// of the folder's repo yet.

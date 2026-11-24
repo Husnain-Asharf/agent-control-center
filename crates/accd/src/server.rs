@@ -293,7 +293,7 @@ async fn dispatch(
         }
         Request::SessionInput { session_id, data_b64 } => {
             let data = B64.decode(data_b64).map_err(|e| ApiError::bad_request(format!("data_b64 is not base64: {e}")))?;
-            shared.state.lock().await.queue_input(&session_id, data)?;
+            shared.state.lock().await.user_input(&session_id, data)?;
             json!({})
         }
         Request::SessionResize { session_id, cols, rows } => {
@@ -329,7 +329,13 @@ async fn dispatch(
             Decided::Resolved(approval) => to_json(&approval),
             Decided::AlreadyResolved => json!({ "already_resolved": true }),
         },
-        Request::EventsList { session_id, limit } => to_json(&shared.state.lock().await.events(session_id.as_deref(), limit)?),
+        Request::EventsList { session_id, limit, project_id, since } => {
+            to_json(&shared.state.lock().await.find_events(session_id.as_deref(), project_id.as_deref(), since, limit)?)
+        }
+        Request::SessionCompact { session_id } => {
+            shared.state.lock().await.session_compact(&session_id)?;
+            json!({})
+        }
         Request::Hook { .. } => return Err(ApiError::internal("hook requests are served by handle_line")),
     })
 }

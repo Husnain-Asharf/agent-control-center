@@ -308,7 +308,7 @@ pub(crate) struct Shared {
     branching: Mutex<()>,
     /// Worktree sizes with when they were measured, so the stats poll does
     /// not walk a big folder every few seconds.
-    folder_sizes: std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, Option<u64>)>>,
+    folder_sizes: std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, Option<u64>, bool)>>,
     /// Woken by a `daemon_restart` request: the daemon then shuts down, and
     /// the app starts a new one.
     pub(crate) restart: tokio::sync::Notify,
@@ -365,6 +365,19 @@ impl Shared {
             if is_finished(&lead.status) {
                 return Err(ApiError::bad_request("This session is not running."));
             }
+            if lead.lead_id.is_some() {
+                return Err(ApiError::bad_request("A helper cannot start helpers of its own. Ask your lead to start one."));
+            }
+            let running = state
+                .sessions
+                .values()
+                .filter(|e| e.live.is_some() && e.session.lead_id.as_deref() == Some(lead_id))
+                .count();
+            if running >= HELPERS_MAX {
+                return Err(ApiError::bad_request(format!(
+                    "This session already runs {HELPERS_MAX} helpers. Wait for one to finish, or message one of them."
+                )));
+            }
             (lead.project_id.clone(), lead.mode)
         };
         if mode != SessionMode::Project {
@@ -375,6 +388,27 @@ impl Shared {
         let task = task.trim();
         if task.is_empty() {
             return Err(ApiError::bad_request("Give the helper a task."));
+        }
+        // The daemon asks the user itself, so the question comes in every
+        // Claude Code permission mode and whatever the project's settings allow.
+        let outcome = self.state.lock().await.request_approval(lead_id, "start_helper".into(), task.to_string(), json!({ "task": task }));
+        let (approval_id, decision) = match outcome {
+            ApprovalOutcome::Pending { id, decision } => (id, decision),
+            ApprovalOutcome::Allowed => (String::new(), {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Answer::Decided(Decision::AllowOnce));
+                rx
+            }),
+            ApprovalOutcome::Ignored => return Err(ApiError::bad_request("This session is not running.")),
+        };
+        match tokio::time::timeout(self.cfg.approval_timeout, decision).await {
+            Ok(Ok(Answer::Decided(Decision::Deny))) => return Err(ApiError::bad_request("Denied in Agent Control Center.")),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return Err(ApiError::bad_request("The request was cancelled.")),
+            Err(_) => {
+                self.state.lock().await.expire(&approval_id);
+                return Err(ApiError::bad_request("No decision in Agent Control Center within 55 minutes."));
+            }
         }
         let session = self.session_start(&project_id, "claude", task, SessionMode::Project, true).await?;
         let mut state = self.state.lock().await;
@@ -407,8 +441,12 @@ impl Shared {
         let mut result = SessionRemoved::default();
         if remove_worktree && session.mode == SessionMode::Worktree {
             if let Some(root) = root {
-                let (worktree, branch) = (PathBuf::from(&session.worktree), session.branch.clone());
-                let (w, b, kept) = blocking(move || worktree::remove_worktree_and_branch(&root, &worktree, &branch)).await?;
+                // Only the branch the daemon made for the session, never one the
+                // worktree was switched to later. Sessions from before
+                // `own_branch` existed fall back to an `agent/` branch name.
+                let branch = session.own_branch.clone().or_else(|| Some(session.branch.clone())).filter(|b| b.starts_with("agent/"));
+                let worktree = PathBuf::from(&session.worktree);
+                let (w, b, kept) = blocking(move || worktree::remove_worktree_and_branch(&root, &worktree, branch.as_deref())).await?;
                 result = SessionRemoved { worktree_removed: w, branch_removed: b, kept };
             }
         }
@@ -438,10 +476,28 @@ impl Shared {
     pub(crate) async fn stats(&self) -> Result<Stats, ApiError> {
         let rows = self.state.lock().await.stats_rows();
         let paths = self.cfg.paths.clone();
-        let cached: HashMap<PathBuf, (std::time::Instant, Option<u64>)> = self.folder_sizes.lock().map(|m| m.clone()).unwrap_or_default();
-        let (stats, measured) = blocking(move || measure(rows, &paths, cached)).await?;
+        // Folders to walk now: a worktree with no fresh size that no other
+        // stats call is walking. The rest use the size known so far.
+        let (cached, walk) = {
+            let mut sizes = self.folder_sizes.lock().map_err(|_| ApiError::internal("folder sizes"))?;
+            let mut walk = Vec::new();
+            for row in rows.iter().filter(|r| r.own_folder) {
+                let ttl = if row.running { FOLDER_SIZE_TTL } else { FOLDER_SIZE_TTL_STOPPED };
+                let stale = sizes.get(&row.folder).is_none_or(|(at, _, walking)| !walking && at.elapsed() >= ttl);
+                if stale {
+                    let old = sizes.get(&row.folder).map(|(_, s, _)| *s).unwrap_or(None);
+                    sizes.insert(row.folder.clone(), (std::time::Instant::now(), old, true));
+                    walk.push(row.folder.clone());
+                }
+            }
+            let cached: HashMap<PathBuf, Option<u64>> = sizes.iter().map(|(k, (_, s, _))| (k.clone(), *s)).collect();
+            (cached, walk)
+        };
+        let (stats, measured) = blocking(move || measure(rows, &paths, cached, walk)).await?;
         if let Ok(mut sizes) = self.folder_sizes.lock() {
-            sizes.extend(measured);
+            for (folder, size) in measured {
+                sizes.insert(folder, (std::time::Instant::now(), size, false));
+            }
         }
         Ok(stats)
     }
@@ -559,6 +615,8 @@ impl Shared {
             project_id: project.id,
             agent: agent.to_string(),
             title: session_title(task),
+            own_branch: (mode == SessionMode::Worktree).then(|| branch.clone()),
+            first_started_at: Some(now),
             branch,
             worktree: worktree.to_string_lossy().into_owned(),
             mode,
@@ -721,6 +779,12 @@ struct Live {
 struct SessionEntry {
     session: Session,
     live: Option<Live>,
+    /// When the user last typed into the session's terminal, and when it
+    /// last went Idle (milliseconds). Compact needs no typing since then.
+    typed_at: i64,
+    idle_at: i64,
+    /// Messages from other sessions that wait for this one to be idle.
+    inbox: Vec<Vec<u8>>,
     /// The folders the repo's `core.hooksPath` names, read when the run
     /// started. Requests on them are protected, like `.git`.
     hook_dirs: Vec<PathBuf>,
@@ -731,7 +795,7 @@ struct SessionEntry {
 
 impl SessionEntry {
     fn new(session: Session, live: Option<Live>) -> SessionEntry {
-        SessionEntry { session, live, hook_dirs: Vec::new(), scrollback: Vec::new(), scrollback_end: 0 }
+        SessionEntry { session, live, typed_at: 0, idle_at: 0, inbox: Vec::new(), hook_dirs: Vec::new(), scrollback: Vec::new(), scrollback_end: 0 }
     }
 }
 
@@ -868,6 +932,10 @@ impl Daemon {
     }
 
     fn save_approval(&self, a: &Approval) {
+        // A Write's whole file is in its input: keep the start of long values only.
+        let mut a = a.clone();
+        shorten_strings(&mut a.input, STORED_STRING_MAX);
+        let a = &a;
         if let Err(e) = self.store.upsert_approval(a) {
             eprintln!("accd: could not save approval {}: {e:#}", a.id);
         }
@@ -961,6 +1029,7 @@ impl Daemon {
             return Err(session_not_found());
         };
         let now = now_ms();
+        entry.session.first_started_at.get_or_insert(entry.session.started_at);
         change_status(&mut entry.session, SessionStatus::Starting, now);
         // A restart is a new run: its output offsets start at 0, and the UI
         // keys its terminal on `started_at`, so it remounts.
@@ -1028,20 +1097,61 @@ impl Daemon {
     /// same folder, and presses Enter. Claude Code queues it if that session
     /// is busy. Control characters are dropped and lines are joined, so the
     /// text cannot press keys of its own.
-    pub(crate) fn session_send(&self, from: &str, to: &str, text: &str) -> Result<(), ApiError> {
-        let sender = &self.entry(from)?.session;
+    pub(crate) fn session_send(&mut self, from: &str, to: &str, text: &str) -> Result<(), ApiError> {
+        let sender = self.entry(from)?.session.clone();
         let target = self.entry(to)?;
         if target.live.is_none() || target.session.worktree != sender.worktree || from == to {
             return Err(ApiError::bad_request("Messages go to another running session in the same folder."));
         }
-        let clean: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clean: String = one_line(text).chars().take(MESSAGE_MAX_CHARS).collect();
         if clean.is_empty() {
             return Err(ApiError::bad_request("The message is empty."));
         }
-        let line = format!("[Message from the session \"{}\" ({})] {}\r", sender.title, sender.id, clean);
-        self.session_event(&target.session, "message.received", "agent", json!({ "from": from, "text": clean }));
-        self.queue_input(to, line.into_bytes())
+        // Pasted, not typed: a paste cannot pick a menu entry or press a key,
+        // and Enter goes as its own write after it.
+        let message = format!("\x1b[200~[Message from the session \"{}\" ({})] {}\x1b[201~", one_line(&sender.title), sender.id, clean);
+        let target_session = target.session.clone();
+        self.session_event(&target_session, "message.received", "agent", json!({ "from": from, "text": clean }));
+        let entry = self.sessions.get_mut(to).ok_or_else(session_not_found)?;
+        if entry.session.status == SessionStatus::Idle {
+            if let Some(live) = &entry.live {
+                let _ = live.input.send(message.into_bytes());
+                let _ = live.input.send(b"\r".to_vec());
+            }
+        } else if entry.inbox.len() >= INBOX_MAX {
+            return Err(ApiError::bad_request("That session has too many messages waiting. Try again once it has read them."));
+        } else {
+            // Delivered when it goes idle, so it cannot answer one of Claude
+            // Code's own questions or land in the middle of a turn.
+            entry.inbox.push(message.into_bytes());
+        }
+        Ok(())
+    }
+
+    /// Input the user typed in the app.
+    pub(crate) fn user_input(&mut self, session_id: &str, data: Vec<u8>) -> Result<(), ApiError> {
+        if let Some(entry) = self.sessions.get_mut(session_id) {
+            entry.typed_at = now_ms();
+        }
+        self.queue_input(session_id, data)
+    }
+
+    /// Types `/compact` into an idle session whose input box was not typed
+    /// into since it went idle, so nothing half-typed is sent with it.
+    pub(crate) fn session_compact(&mut self, session_id: &str) -> Result<(), ApiError> {
+        let entry = self.entry(session_id)?;
+        if entry.live.is_none() {
+            return Err(ApiError::bad_request("The session is not running."));
+        }
+        if entry.session.status != SessionStatus::Idle {
+            return Err(ApiError::bad_request("Compact works when the session is idle. Try again once its turn ends."));
+        }
+        if entry.typed_at > entry.idle_at {
+            return Err(ApiError::bad_request(
+                "Something is typed in the session's input box. Send it or clear it, then compact.",
+            ));
+        }
+        self.queue_input(session_id, b"/compact\r".to_vec())
     }
 
     pub(crate) fn queue_input(&self, session_id: &str, data: Vec<u8>) -> Result<(), ApiError> {
@@ -1095,7 +1205,18 @@ impl Daemon {
         if entry.session.status == status {
             return;
         }
-        change_status(&mut entry.session, status, now_ms());
+        let now = now_ms();
+        change_status(&mut entry.session, status, now);
+        if entry.session.status == SessionStatus::Idle {
+            entry.idle_at = now;
+            // Messages that waited for the session to finish its turn.
+            if let Some(live) = &entry.live {
+                for message in entry.inbox.drain(..) {
+                    let _ = live.input.send(message);
+                    let _ = live.input.send(b"\r".to_vec());
+                }
+            }
+        }
         let session = entry.session.clone();
         self.publish(&session);
         self.session_event(&session, "session.status", actor, json!({ "status": session.status }));
@@ -1218,7 +1339,7 @@ impl Daemon {
         others.sort_by_key(|s| s.started_at);
         let list: Vec<String> = others.iter().map(|s| format!("- {}", s.title)).collect();
         Some(format!(
-            "Agent Control Center: this session shares its folder ({}) with {} other running Claude Code {}, so their changes show up here at once:\n{}\nWork on different files than they do. Use the built-in messages between local sessions (ListAgents, SendMessage) to split the work or ask before you touch a file another session is changing.",
+            "Agent Control Center: this session shares its folder ({}) with {} other running Claude Code {}, so their changes show up here at once:\n{}\nWork on different files than they do. Use your tools mcp__acc__list_sessions and mcp__acc__send_message to split the work or ask before you touch a file another session is changing, and mcp__acc__start_helper to hand a part to a new helper.",
             me.worktree,
             others.len(),
             if others.len() == 1 { "session" } else { "sessions" },
@@ -1263,6 +1384,12 @@ impl Daemon {
     fn keep_sample(&self, sample: &UsageSample) {
         if let Err(e) = self.store.add_sample(sample, sample.ts - SAMPLE_KEEP_MS) {
             eprintln!("accd: could not keep a usage sample: {e:#}");
+        }
+        // Once an hour, drop old events and finished approvals.
+        if (sample.ts / 60_000) % 60 == 0 {
+            if let Err(e) = self.store.prune(sample.ts - EVENT_KEEP_MS) {
+                eprintln!("accd: could not prune old events: {e:#}");
+            }
         }
     }
 
@@ -1336,6 +1463,7 @@ impl Daemon {
             .values()
             .map(|e| StatsRow {
                 session_id: e.session.id.clone(),
+                running: e.live.is_some(),
                 #[cfg(unix)]
                 pid: e.live.as_ref().and_then(|l| l.pty.pid()),
                 scrollback_bytes: e.live.as_ref().map(|l| l.pty.scrollback().len()).unwrap_or(e.scrollback.len()) as u64,
@@ -1390,7 +1518,7 @@ impl Daemon {
         let Some(entry) = self.sessions.get(session_id) else { return PreToolOutcome::Proceed };
         let project_id = entry.session.project_id.clone();
         // The name Make branch will use, so the card shows the real one.
-        let branch = worktree::free_branch(Path::new(&entry.session.worktree), &worktree::slugify(&entry.session.title));
+        let branch = worktree::free_branch_from_files(Path::new(&entry.session.worktree), &worktree::slugify(&entry.session.title));
         let approval = Approval {
             id: Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
@@ -1605,8 +1733,8 @@ impl Daemon {
         }
     }
 
-    pub(crate) fn events(&self, session_id: Option<&str>, limit: u32) -> Result<Vec<EventRecord>, ApiError> {
-        self.store.list_events(session_id, limit).map_err(ApiError::internal)
+    pub(crate) fn find_events(&self, session_id: Option<&str>, project_id: Option<&str>, since: Option<i64>, limit: u32) -> Result<Vec<EventRecord>, ApiError> {
+        self.store.find_events(session_id, project_id, since, limit.min(20_000)).map_err(ApiError::internal)
     }
 
     /// Kills every running agent without recording the exits, and returns
@@ -1723,6 +1851,7 @@ fn touches_dirs(summary: &str, input: &Value, dirs: &[PathBuf], folder: &Path) -
 
 struct StatsRow {
     session_id: String,
+    running: bool,
     #[cfg(unix)]
     pid: Option<u32>,
     scrollback_bytes: u64,
@@ -1730,19 +1859,28 @@ struct StatsRow {
     own_folder: bool,
 }
 
+/// How many helpers one lead may run at once.
+const HELPERS_MAX: usize = 4;
+
+/// The longest message one session sends another, in characters.
+const MESSAGE_MAX_CHARS: usize = 4000;
+/// How many messages may wait for a busy session.
+const INBOX_MAX: usize = 20;
+/// How long events and finished approvals are kept.
+const EVENT_KEEP_MS: i64 = 30 * 24 * 3_600_000;
+
 /// How long usage samples are kept.
 const SAMPLE_KEEP_MS: i64 = 7 * 24 * 3_600_000;
+
+/// How long a stopped session's worktree size is reused.
+const FOLDER_SIZE_TTL_STOPPED: Duration = Duration::from_secs(30 * 60);
 
 /// How long a measured worktree size is reused.
 const FOLDER_SIZE_TTL: Duration = Duration::from_secs(120);
 
 /// Measures memory and disk for [`Shared::stats`], off the runtime threads.
 /// Returns the stats and the worktree sizes it measured anew.
-fn measure(
-    rows: Vec<StatsRow>,
-    paths: &Paths,
-    cached: HashMap<PathBuf, (std::time::Instant, Option<u64>)>,
-) -> (Stats, Vec<(PathBuf, (std::time::Instant, Option<u64>))>) {
+fn measure(rows: Vec<StatsRow>, paths: &Paths, cached: HashMap<PathBuf, Option<u64>>, walk: Vec<PathBuf>) -> (Stats, Vec<(PathBuf, Option<u64>)>) {
     #[cfg(unix)]
     let table = process_table();
     let home = dirs::home_dir();
@@ -1762,13 +1900,12 @@ fn measure(
             let (memory_bytes, processes) = (None, 0);
             let transcript_bytes = home.as_ref().and_then(|h| file_size(&transcript_path(h, &row.folder, &row.session_id)));
             let folder_bytes = if row.own_folder {
-                match cached.get(&row.folder) {
-                    Some((at, size)) if at.elapsed() < FOLDER_SIZE_TTL => *size,
-                    _ => {
-                        let size = folder_size(&row.folder);
-                        fresh.push((row.folder.clone(), (std::time::Instant::now(), size)));
-                        size
-                    }
+                if walk.contains(&row.folder) && !fresh.iter().any(|(f, _)| *f == row.folder) {
+                    let size = folder_size(&row.folder);
+                    fresh.push((row.folder.clone(), size));
+                    size
+                } else {
+                    fresh.iter().find(|(f, _)| *f == row.folder).map(|(_, s)| *s).unwrap_or_else(|| cached.get(&row.folder).copied().flatten())
                 }
             } else {
                 None
@@ -1854,6 +1991,21 @@ fn tree_memory(table: &[(u32, u32, u64)], root: u32) -> (u64, u32) {
     (total, count)
 }
 
+/// How many characters of one input value an approval keeps in the store.
+const STORED_STRING_MAX: usize = 4096;
+
+fn shorten_strings(v: &mut Value, max: usize) {
+    match v {
+        Value::String(s) if s.chars().count() > max => {
+            let kept: String = s.chars().take(max).collect();
+            *s = format!("{kept}… ({} more characters not kept)", s.chars().count() - max);
+        }
+        Value::Array(items) => items.iter_mut().for_each(|i| shorten_strings(i, max)),
+        Value::Object(map) => map.values_mut().for_each(|i| shorten_strings(i, max)),
+        _ => {}
+    }
+}
+
 fn same_usage(a: &SessionUsage, b: &SessionUsage) -> bool {
     SessionUsage { updated_at: 0, ..a.clone() } == SessionUsage { updated_at: 0, ..b.clone() }
 }
@@ -1867,8 +2019,15 @@ fn is_finished(status: &SessionStatus) -> bool {
 }
 
 /// Sets the status and opens a new history entry, which closes the previous one.
+/// How many status changes a session keeps; older ones are dropped.
+const HISTORY_MAX: usize = 1000;
+
 fn change_status(s: &mut Session, status: SessionStatus, now: i64) {
     s.history.push(StatusChange { status: status.clone(), at: now });
+    if s.history.len() > HISTORY_MAX {
+        let extra = s.history.len() - HISTORY_MAX;
+        s.history.drain(..extra);
+    }
     s.status = status;
     s.status_since = now;
 }
@@ -1882,9 +2041,19 @@ fn rule_json(rule: &AllowRule) -> Value {
 }
 
 /// The task's first line, trimmed, at most 80 characters.
+/// The task's first line, with control characters dropped, so a title
+/// typed into another session's terminal cannot press keys there.
 fn session_title(task: &str) -> String {
     let line = task.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
-    line.chars().take(TITLE_MAX_CHARS).collect::<String>().trim_end().to_string()
+    let clean = one_line(line);
+    clean.chars().take(TITLE_MAX_CHARS).collect::<String>().trim_end().to_string()
+}
+
+/// Text as one line: control characters (C0 and C1, escape included) become
+/// spaces, and runs of spaces become one.
+fn one_line(text: &str) -> String {
+    let spaced: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Why Always allow on a request allows it once and adds no rule.

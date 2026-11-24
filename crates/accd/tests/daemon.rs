@@ -497,7 +497,7 @@ async fn session_start_spawns_claude_in_worktree() {
     let run = run_record(&s.worktree);
     let mcp = h.data.join("sessions").join(&s.id).join("mcp.json");
     let (settings, mcp) = (settings.to_string_lossy(), mcp.to_string_lossy());
-    assert_eq!(run["args"], json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "Fix the login bug"]));
+    assert_eq!(run["args"], json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "--", "Fix the login bug"]));
     assert_eq!(Path::new(run["cwd"].as_str().unwrap()), Path::new(&s.worktree));
     assert_eq!(run["session_id"], s.id);
     let rec = app.recorded("session.started").await;
@@ -1306,7 +1306,7 @@ async fn restart_marks_orphans_stopped() {
     assert!(got.ended_at.is_some());
     assert!(snap.approvals.is_empty(), "{:?}", snap.approvals);
 
-    let events: Vec<EventRecord> = from(app.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100 }).await);
+    let events: Vec<EventRecord> = from(app.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100, project_id: None, since: None }).await);
     assert!(events.iter().any(|e| e.kind == "session.status" && e.actor == "system" && e.payload["status"] == "stopped"));
     assert!(events.iter().any(|e| e.kind == "approval.cancelled" && e.actor == "system" && e.payload["approval_id"] == a.id.as_str()));
     assert!(!events.iter().any(|e| e.kind == "session.exited"), "shutdown does not record exits");
@@ -1800,7 +1800,7 @@ async fn second_daemon_on_same_dir_is_refused() {
     let mut other = Client::app(&h.socket()).await;
     let snap: Snapshot = from(other.call(Request::Snapshot).await);
     assert_eq!(snap.sessions[0].status, SessionStatus::Starting);
-    let events: Vec<EventRecord> = from(other.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100 }).await);
+    let events: Vec<EventRecord> = from(other.call(Request::EventsList { session_id: Some(s.id.clone()), limit: 100, project_id: None, since: None }).await);
     assert!(!events.iter().any(|e| e.actor == "system"), "{events:?}");
     stop(server).await;
     // On Windows the next daemon can make its pipe only once no client holds
@@ -1873,7 +1873,7 @@ async fn project_session_works_in_the_project_folder() {
     let (settings, mcp) = (settings.to_string_lossy(), mcp.to_string_lossy());
     assert_eq!(
         run["args"],
-        json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "--setting-sources", "user,project", "Fix the login bug"])
+        json!(["--settings", settings, "--mcp-config", mcp, "--session-id", s.id, "--setting-sources", "user,project", "--", "Fix the login bug"])
     );
     assert_eq!(Path::new(run["cwd"].as_str().unwrap()), repo_root(&h.repo));
     stop(server).await;
@@ -2210,7 +2210,7 @@ async fn a_session_in_a_shared_folder_is_told_about_the_others() {
     let mut hk = hook(&h.socket(), &two.id, json!({"hook_event_name": "SessionStart"})).await;
     let out: Value = serde_json::from_str(&hook_reply(&mut hk).await.stdout.unwrap()).unwrap();
     let note = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(note.contains("Add the API") && note.contains("SendMessage"), "{note}");
+    assert!(note.contains("Add the API") && note.contains("mcp__acc__send_message"), "{note}");
     stop(server).await;
 }
 
@@ -2270,7 +2270,18 @@ async fn a_lead_starts_a_helper_lists_the_folder_and_messages_it() {
     let mut app = Client::app(&h.socket()).await;
     let lead = start_project_session(&mut app, &h.repo, "Build the shop").await;
 
-    let started = app.call(Request::HelperStart { from_session: lead.id.clone(), task: "Add the cart API in src/cart".into() }).await;
+    // The daemon asks the user before it starts a helper.
+    let socket = h.socket();
+    let lead_id = lead.id.clone();
+    let start = tokio::spawn(async move {
+        let mut c = Client::connect(&socket).await;
+        let id = c.send(Request::HelperStart { from_session: lead_id, task: "Add the cart API in src/cart".into() }).await;
+        c.reply(id).await
+    });
+    let ask = app.approval_created().await;
+    assert_eq!((ask.tool.as_str(), ask.summary.as_str()), ("start_helper", "Add the cart API in src/cart"));
+    app.call(Request::ApprovalDecide { approval_id: ask.id, decision: Decision::AllowOnce }).await;
+    let started = start.await.unwrap().unwrap();
     let helper_id = started["session_id"].as_str().unwrap().to_string();
     let helper = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(s) if s.id == helper_id && s.lead_id.is_some()));
     match helper.await {
@@ -2287,9 +2298,17 @@ async fn a_lead_starts_a_helper_lists_the_folder_and_messages_it() {
     assert!(list.iter().any(|s| s.session_id == lead.id && s.is_you));
     assert!(list.iter().any(|s| s.session_id == helper_id && s.lead_id.as_deref() == Some(lead.id.as_str())));
 
+    // A busy session gets the message once its turn ends, as a paste.
     let sent = Request::SessionSend { from_session: lead.id.clone(), to_session: helper_id.clone(), text: "Start with\nthe model".into() };
     app.call(sent).await;
-    app.output_until(&helper_id, "[Message from the session \"Build the shop\"").await;
+    let mut hk = hook(&h.socket(), &helper_id, json!({"hook_event_name": "Stop"})).await;
+    hook_reply(&mut hk).await;
+    let (text, _) = app.output_until(&helper_id, "Start with the model").await;
+    assert!(text.contains("[Message from the session \"Build the shop\""), "{text}");
+
+    // A helper cannot start helpers of its own.
+    let (code, _) = app.call_err(Request::HelperStart { from_session: helper_id.clone(), task: "more".into() }).await;
+    assert_eq!(code, "bad_request");
     let (code, _) = app.call_err(Request::SessionSend { from_session: lead.id.clone(), to_session: lead.id.clone(), text: "x".into() }).await;
     assert_eq!(code, "bad_request", "not to itself");
 
@@ -2297,5 +2316,61 @@ async fn a_lead_starts_a_helper_lists_the_folder_and_messages_it() {
     let own = start_session(&mut app, &h.repo, "Elsewhere").await;
     let (code, _) = app.call_err(Request::HelperStart { from_session: own.id, task: "x".into() }).await;
     assert_eq!(code, "bad_request");
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn compact_waits_for_idle_and_an_empty_input_box() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_project_session(&mut app, &h.repo, "Long work").await;
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+
+    let (code, msg) = app.call_err(Request::SessionCompact { session_id: s.id.clone() }).await;
+    assert_eq!(code, "bad_request", "not idle yet: {msg}");
+
+    let mut hk = hook(&h.socket(), &s.id, json!({"hook_event_name": "Stop"})).await;
+    hook_reply(&mut hk).await;
+    app.status(&s.id, SessionStatus::Idle).await;
+    app.call(Request::SessionInput { session_id: s.id.clone(), data_b64: B64.encode("half typed") }).await;
+    let (code, msg) = app.call_err(Request::SessionCompact { session_id: s.id.clone() }).await;
+    assert_eq!(code, "bad_request");
+    assert!(msg.contains("typed"), "{msg}");
+
+    // A finished turn after that clears the way.
+    let mut hk = hook(&h.socket(), &s.id, json!({"hook_event_name": "UserPromptSubmit"})).await;
+    hook_reply(&mut hk).await;
+    app.status(&s.id, SessionStatus::Working).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut hk = hook(&h.socket(), &s.id, json!({"hook_event_name": "Stop"})).await;
+    hook_reply(&mut hk).await;
+    app.status(&s.id, SessionStatus::Idle).await;
+    app.call(Request::SessionCompact { session_id: s.id.clone() }).await;
+    app.output_until(&s.id, "/compact").await;
+    stop(server).await;
+}
+
+#[tokio::test]
+async fn removal_deletes_only_the_branch_it_made() {
+    let h = Harness::new();
+    let server = start(h.config(fixture())).await;
+    let mut app = Client::app(&h.socket()).await;
+    let s = start_session(&mut app, &h.repo, "Fix the bug").await;
+    assert_eq!(s.own_branch.as_deref(), Some(s.branch.as_str()));
+    app.output_until(&s.id, &format!("ENV:{}", s.id)).await;
+    git(&h.repo, &["branch", "develop"]);
+    git(Path::new(&s.worktree), &["switch", "-q", "develop"]);
+    let moved = app.event(|e| matches!(e, DaemonEvent::SessionUpdated(u) if u.id == s.id && u.branch == "develop"));
+    assert!(matches!(moved.await, DaemonEvent::SessionUpdated(_)));
+    app.call(Request::SessionStop { session_id: s.id.clone() }).await;
+    app.status(&s.id, SessionStatus::Stopped).await;
+    git(Path::new(&s.worktree), &["clean", "-fdxq"]);
+
+    let removed: acc_protocol::SessionRemoved =
+        from(app.call(Request::SessionRemove { session_id: s.id.clone(), remove_worktree: true }).await);
+    assert!(removed.worktree_removed, "{:?}", removed.kept);
+    assert_eq!(git(&h.repo, &["branch", "--list", "develop"]).trim_start_matches(['*', ' ']), "develop", "develop is kept");
+    assert_eq!(git(&h.repo, &["branch", "--list", &s.branch]), "", "its own agent branch went");
     stop(server).await;
 }

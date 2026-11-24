@@ -164,6 +164,7 @@ fn mcp_lists_the_session_tools_and_fails_clearly_without_the_app() {
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"nope"}"#,
+        "not json",
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -175,11 +176,32 @@ fn mcp_lists_the_session_tools_and_fails_clearly_without_the_app() {
     let out = child.wait_with_output().unwrap();
     let replies: Vec<serde_json::Value> =
         String::from_utf8(out.stdout).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(replies.len(), 4, "the notification gets no reply");
+    assert_eq!(replies.len(), 5, "the notification gets no reply");
+    assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(replies[4]["error"]["code"], -32700);
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "acc");
     let names: Vec<&str> = replies[1]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["start_helper", "list_sessions", "send_message"]);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(replies[2]["result"]["content"][0]["text"].as_str().unwrap().contains("not running"));
     assert_eq!(replies[3]["error"]["code"], -32601);
+}
+
+
+/// Without ACC_SESSION_ID the server says so at initialize.
+#[test]
+fn mcp_refuses_outside_an_app_session() {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_acc-hook"))
+        .arg("mcp")
+        .env_remove("ACC_SESSION_ID")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"1999-01-01"}}}}"#).unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let reply: serde_json::Value = serde_json::from_str(String::from_utf8(out.stdout).unwrap().lines().next().unwrap()).unwrap();
+    assert!(reply["error"]["message"].as_str().unwrap().contains("ACC_SESSION_ID"));
 }
