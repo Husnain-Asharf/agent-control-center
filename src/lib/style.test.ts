@@ -7,17 +7,19 @@ import {
   DEFAULT_STYLE,
   GLASS_VARS,
   blurNote,
+  glassAlpha,
+  glassStatus,
+  glassVars,
+  liftText,
+  materialFor,
   opacityReads,
   parseBlur,
   parseOpacity,
-  surfaceAlpha,
-  glassAlpha,
-  glassVars,
-  liftText,
   parseStyle,
   readsOver,
   showsDesktop,
   styleNote,
+  surfaceAlpha,
 } from './style';
 
 /** The variables of one theme block in tokens.css. */
@@ -175,7 +177,7 @@ describe('saved blur and opacity', () => {
     expect(parseOpacity(saved)).toBeNull();
   });
   it('says on macOS that 0 shows the desktop sharp', () => {
-    expect(blurNote('mac')).toContain('0 shows it sharp');
+    expect(blurNote('mac')).toContain('0 is sharp');
     expect(blurNote('windows')).not.toContain('desktop');
   });
 });
@@ -221,5 +223,19 @@ describe('glass css', () => {
   it('keeps wells and the terminal out of the glass rules', () => {
     const glass = appCss.slice(appCss.indexOf('/* Glass'));
     expect(glass).not.toMatch(/\.well|\.terminal|xterm/);
+  });
+});
+
+describe('materialFor', () => {
+  it('picks a lighter or stronger macOS material by blur', () => {
+    expect(materialFor(0)).toBeNull();
+    expect(materialFor(4)).toBe('underWindowBackground');
+    expect(materialFor(10)).toBe('underWindowBackground');
+    expect(materialFor(16)).toBe('sidebar');
+    expect(materialFor(24)).toBe('sidebar');
+    expect(materialFor(40)).toBe('hudWindow');
+  });
+  it('starts with the window not see-through', () => {
+    expect(glassStatus().state).toBe('off');
   });
 });

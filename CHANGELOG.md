@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Glass opacity: the slider works while Auto is on (moving it turns Auto
+  off), and cards and lists turn see-through too, so the setting shows
+  across the window.
+- Glass blur on macOS picks a lighter or stronger system material (sharp,
+  light, medium, strong), since macOS has no blur amount of its own.
+  Settings says so when macOS refuses the see-through window.
+
 ## [0.6.0] - 2026-11-24
 
 Helper sessions, and more control over the Glass style.

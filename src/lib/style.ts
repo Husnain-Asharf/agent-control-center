@@ -64,9 +64,34 @@ export const DEFAULT_GLASS: GlassLook = { blur: DEFAULT_BLUR, opacity: null };
 /** The Settings note under Blur. */
 export function blurNote(on: Platform): string {
   if (showsDesktop(on)) {
-    return 'Blurs popups and dialogs over the app. macOS sets how much the desktop is blurred; 0 shows it sharp.';
+    return 'How much the desktop behind the window is blurred, in steps macOS offers: 0 is sharp, then light, medium and strong. Popups follow the value.';
   }
   return 'Blurs popups and dialogs over the app.';
+}
+
+/** The macOS material for a blur value: lighter materials blur and tint less. 0 means none. */
+export function materialFor(blur: number): 'underWindowBackground' | 'sidebar' | 'hudWindow' | null {
+  if (blur <= 0) return null;
+  if (blur <= 10) return 'underWindowBackground';
+  if (blur <= 24) return 'sidebar';
+  return 'hudWindow';
+}
+
+/** Whether the see-through window is on, waiting, or refused by the system (with why). */
+export type GlassStatus = { state: 'off' | 'pending' | 'on' } | { state: 'failed'; why: string };
+let status: GlassStatus = { state: 'off' };
+const STATUS_EVENT = 'acc:glass-status';
+function setStatus(next: GlassStatus): void {
+  status = next;
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') window.dispatchEvent(new Event(STATUS_EVENT));
+}
+export function glassStatus(): GlassStatus {
+  return status;
+}
+export function onGlassStatus(cb: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {};
+  window.addEventListener(STATUS_EVENT, cb);
+  return () => window.removeEventListener(STATUS_EVENT, cb);
 }
 
 // Glass colors
@@ -198,6 +223,7 @@ export function applyStyle(style: Style, theme: Theme, look: GlassLook = DEFAULT
   if (body) for (const name of GLASS_VARS) body.style.removeProperty(name);
   if (style === 'solid') {
     delete root.dataset.seeThrough;
+    setStatus({ state: 'off' });
     windowLook = '';
     if (windowGlass) setWindowGlass(false, theme);
     return;
@@ -205,10 +231,11 @@ export function applyStyle(style: Style, theme: Theme, look: GlassLook = DEFAULT
   body?.style.setProperty('--glass-blur', `${look.blur}px`);
   setGlassColors(true, look.opacity);
   if (isMac && isTauri()) {
-    const want = `${look.blur > 0 ? 'blur' : 'clear'}:${theme}`;
+    const material = materialFor(look.blur);
+    const want = `${material ?? 'clear'}:${theme}`;
     if (want === windowLook) return;
     windowLook = want;
-    if (look.blur > 0) setWindowGlass(true, theme);
+    if (material) setWindowGlass(true, theme, material);
     else setWindowClear(theme);
   }
 }
@@ -230,26 +257,33 @@ function setGlassColors(retry: boolean, opacity: Opacity): void {
   for (const [name, value] of Object.entries(vars)) body.style.setProperty(name, value);
 }
 
-function setWindowGlass(on: boolean, theme: Theme): void {
+function setWindowGlass(on: boolean, theme: Theme, material: ReturnType<typeof materialFor> = 'sidebar'): void {
   const call = ++applied;
   const root = document.documentElement;
   windowGlass = on;
+  setStatus(on ? { state: 'pending' } : { state: 'off' });
   try {
     const win = getCurrentWindow();
     const done = on
       ? Promise.all([
           // The material follows the window's appearance, so match it to the app theme.
           win.setTheme(theme),
-          win.setEffects({ effects: [Effect.Sidebar], state: EffectState.FollowsWindowActiveState }),
+          win.setEffects({ effects: [(material ?? 'sidebar') as Effect], state: EffectState.FollowsWindowActiveState }),
         ])
       : Promise.all([win.clearEffects(), win.setTheme(null)]);
     done
       .then(() => {
-        if (call === applied && on) root.dataset.seeThrough = '';
+        if (call === applied && on) {
+          root.dataset.seeThrough = '';
+          setStatus({ state: 'on' });
+        }
       })
-      .catch(() => {
-        // No vibrancy: the CSS look stays.
-        if (call === applied) delete root.dataset.seeThrough;
+      .catch((e: unknown) => {
+        // No vibrancy: the CSS look stays, and Settings says why.
+        if (call === applied) {
+          delete root.dataset.seeThrough;
+          if (on) setStatus({ state: 'failed', why: e instanceof Error ? e.message : String(e) });
+        }
       });
   } catch {
     // no window
@@ -263,12 +297,19 @@ function setWindowClear(theme: Theme): void {
   windowGlass = true;
   try {
     const win = getCurrentWindow();
+    setStatus({ state: 'pending' });
     Promise.all([win.clearEffects(), win.setTheme(theme)])
       .then(() => {
-        if (call === applied) root.dataset.seeThrough = '';
+        if (call === applied) {
+          root.dataset.seeThrough = '';
+          setStatus({ state: 'on' });
+        }
       })
-      .catch(() => {
-        if (call === applied) delete root.dataset.seeThrough;
+      .catch((e: unknown) => {
+        if (call === applied) {
+          delete root.dataset.seeThrough;
+          setStatus({ state: 'failed', why: e instanceof Error ? e.message : String(e) });
+        }
       });
   } catch {
     // no window

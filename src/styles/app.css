@@ -903,3 +903,6 @@ button.link { background: none; border: 0; padding: 0; font: inherit; cursor: po
 @media (max-width: 1000px) { .an-trends { grid-template-columns: minmax(0, 1fr); } }
 :root[data-style="glass"] .an-tip { background: var(--glass-raised, var(--raised)); backdrop-filter: blur(calc(var(--glass-blur, 16px) * 1.5)) saturate(150%); -webkit-backdrop-filter: blur(calc(var(--glass-blur, 16px) * 1.5)) saturate(150%); }
 .an-tiles + .block { margin-top: 36px; }
+
+/* Glass reaches the cards and lists too, at the popups' alpha, so the opacity setting shows across the window. */
+:root[data-style="glass"] :is(.list, .an-tile, .an-chart, .coord-card, .coord-folder, .dock) { background: var(--glass-raised, var(--raised)); }

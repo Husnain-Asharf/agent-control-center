@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Dialog } from '../components/Dialog';
 import { request } from '../lib/ipc';
@@ -27,6 +27,9 @@ import {
   blurNote,
   opacityReads,
   styleNote,
+  glassStatus,
+  onGlassStatus,
+  showsDesktop,
 } from '../lib/style';
 import type { Theme } from '../lib/types';
 import { useStore } from '../store/store';
@@ -114,8 +117,16 @@ function GlassRows() {
   const css = typeof document === 'undefined' ? null : getComputedStyle(document.documentElement);
   const reads = !css || opacityReads((n) => css.getPropertyValue(n), opacity);
   const auto = opacity === null;
+  const [see, setSee] = useState(glassStatus());
+  useEffect(() => onGlassStatus(() => setSee(glassStatus())), []);
   return (
     <>
+      {showsDesktop(platform) && see.state === 'failed' && (
+        <p className="msg-flag" role="alert">
+          macOS did not turn on the see-through window ({see.why}), so Glass shows the app's own background. Restart the
+          app once; if it stays, tell us which macOS version you have.
+        </p>
+      )}
       <Row title="Blur" note={blurNote(platform)}>
         <Slider label="Blur" min={BLUR_MIN} max={BLUR_MAX} step={BLUR_STEP} value={blur} unit="px" onChange={setBlur} />
       </Row>
@@ -123,7 +134,7 @@ function GlassRows() {
         title="Opacity"
         note={
           auto
-            ? 'Auto keeps the panels as clear as they can be while text still reads.'
+            ? 'Auto keeps the panels as clear as they can be while text still reads. Move the slider to set it yourself.'
             : reads
               ? 'How solid the panels are. Popups stay a little more solid.'
               : 'Some text may be hard to read over a very light or dark desktop at this opacity.'
@@ -141,7 +152,6 @@ function GlassRows() {
             step={OPACITY_STEP}
             value={opacity ?? OPACITY_START}
             unit="%"
-            disabled={auto}
             onChange={setOpacity}
           />
         </div>
