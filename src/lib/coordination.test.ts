@@ -28,7 +28,7 @@ describe('coordination', () => {
         used('a', 'Write', '/repo/src/shared.ts', 120),
         used('b', 'Edit', '/repo/src/shared.ts', 130),
         used('b', 'Read', '/repo/src/api.ts', 140),
-        used('b', 'SendMessage', 'SendMessage', 150),
+        used('b', 'mcp__acc__send_message', 'mcp__acc__send_message', 150),
         used('c', 'Edit', '/repo/.worktrees/c/src/x.ts', 160),
         used('a', 'Edit', '/repo/old.ts', 10),
       ],

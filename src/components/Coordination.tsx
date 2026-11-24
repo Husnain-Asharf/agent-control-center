@@ -15,11 +15,15 @@ export function Coordination({ project, sessions, now }: { project: Project; ses
   const [loaded, setLoaded] = useState<EventRecord[]>([]);
   useEffect(() => {
     let on = true;
-    request<EventRecord[]>('events_list', { session_id: null, limit: 500 })
-      .then((list) => on && setLoaded(list))
-      .catch(() => {});
+    const ask = () =>
+      request<EventRecord[]>('events_list', { session_id: null, limit: 20000, project_id: project.id, since: Date.now() - WINDOW_MS })
+        .then((list) => on && setLoaded(list))
+        .catch(() => {});
+    ask();
+    const t = setInterval(ask, 60_000);
     return () => {
       on = false;
+      clearInterval(t);
     };
   }, [project.id]);
   const events = useMemo(() => {

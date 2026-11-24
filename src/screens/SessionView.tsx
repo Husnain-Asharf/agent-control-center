@@ -10,7 +10,6 @@ import { Dialog } from '../components/Dialog';
 import { go } from '../lib/route';
 import type { SessionRemoved } from '../lib/types';
 import { request } from '../lib/ipc';
-import { bytesToB64 } from '../lib/b64';
 import { useRoute } from '../lib/route';
 import type { EventRecord, Session } from '../lib/types';
 import { pendingForSession, useStore } from '../store/store';
@@ -75,7 +74,24 @@ export function SessionView() {
   }
 
   const act = (method: 'session_stop' | 'session_restart') =>
-    request(method, { session_id: session.id }).catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
+    request(method, { session_id: session.id })
+      .then(() => {
+        // Stopping a lead leaves its helpers running: offer to stop them too.
+        const running = Object.values(sessions).filter((x) => x.lead_id === session.id && LIVE.includes(x.status));
+        if (method === 'session_stop' && running.length > 0) {
+          pushToast({
+            msg: `${session.title} has ${running.length} running ${running.length === 1 ? 'helper' : 'helpers'}.`,
+            kind: 'needs',
+            actions: [
+              {
+                label: 'Stop helpers too',
+                run: () => running.forEach((x) => void request('session_stop', { session_id: x.id }).catch(() => {})),
+              },
+            ],
+          });
+        }
+      })
+      .catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }));
 
   const mine = stats?.sessions.find((r) => r.session_id === session.id);
   const lead = session.lead_id ? sessions[session.lead_id] : undefined;
@@ -111,7 +127,7 @@ export function SessionView() {
                   : 'Compact works when the session is idle'
               }
               onClick={() =>
-                request('session_input', { session_id: session.id, data_b64: bytesToB64(new TextEncoder().encode('/compact\r')) })
+                request('session_compact', { session_id: session.id })
                   .then(() => pushToast({ msg: `Compacting ${session.title}.`, kind: 'working' }))
                   .catch((e: unknown) => pushToast({ msg: errorText(e), kind: 'failed' }))
               }
@@ -320,11 +336,12 @@ function RemoveDialog({ session, onClose }: { session: Session; onClose: () => v
     <Dialog title="Remove session" onClose={onClose} onSubmit={submit}>
       <p className="muted">
         {session.title} leaves the app with its history. Its files and commits stay where they are.
+        {own && ' Deleting the worktree also deletes files git ignores in it, such as .env.local and build output.'}
       </p>
       {own && (
         <label className="check">
           <input type="checkbox" checked={alsoWorktree} onChange={(e) => setAlsoWorktree(e.target.checked)} />
-          Also delete its worktree and the branch {session.branch}, if git can do it without losing work
+          Also delete its worktree and the branch {session.own_branch ?? session.branch}, if git can do it without losing work
         </label>
       )}
       <div className="dialog-actions">

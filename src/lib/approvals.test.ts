@@ -43,6 +43,13 @@ describe('wantsText', () => {
   });
 });
 
+describe('helper approvals', () => {
+  it('say a helper is being started', () => {
+    expect(wantsText('start_helper')).toBe('Wants to start a helper session');
+    expect(wantsVerb('start_helper')).toBe('start a helper:');
+  });
+});
+
 describe('wantsVerb', () => {
   it('uses run only for commands', () => {
     expect(wantsVerb('Bash')).toBe('run');

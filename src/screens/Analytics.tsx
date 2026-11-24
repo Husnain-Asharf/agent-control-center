@@ -24,7 +24,6 @@ import {
   type SessionRow,
   type SortKey,
 } from '../lib/analytics';
-import { bytesToB64 } from '../lib/b64';
 import { errorText } from '../lib/errorText';
 import { fmtDur } from '../lib/format';
 import { request } from '../lib/ipc';
@@ -40,9 +39,8 @@ const pct = (v: number) => `${Math.round(v)}%`;
 const money = (v: number) => (v === 0 ? '$0' : v < 10 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
 const bytes = (v: number) => (v === 0 ? '0' : (fmtBytes(v) ?? ''));
 
-const encoder = new TextEncoder();
-const sendCompact = (sessionId: string) =>
-  request('session_input', { session_id: sessionId, data_b64: bytesToB64(encoder.encode('/compact\r')) });
+/** The daemon types /compact only into an idle session with nothing half-typed, and says why not otherwise. */
+const sendCompact = (sessionId: string) => request('session_compact', { session_id: sessionId });
 
 /** Samples and events for the range, asked again every minute while the screen is open. */
 function useHistory(since: number): { samples: UsageSample[] | null; events: EventRecord[] } {
@@ -50,11 +48,18 @@ function useHistory(since: number): { samples: UsageSample[] | null; events: Eve
   const [events, setEvents] = useState<EventRecord[]>([]);
   useEffect(() => {
     let live = true;
+    // The first ask takes the whole range; each later one only what is new.
+    let held: UsageSample[] = [];
     const ask = () => {
-      request<UsageSample[]>('usage_history', { since })
-        .then((s) => live && setSamples(s))
+      const from = held.length ? held[held.length - 1].ts + 1 : since;
+      request<UsageSample[]>('usage_history', { since: from })
+        .then((s) => {
+          if (!live) return;
+          held = [...held, ...s].filter((x) => x.ts >= since);
+          setSamples(held);
+        })
         .catch(() => live && setSamples((prev) => prev ?? []));
-      request<EventRecord[]>('events_list', { session_id: null, limit: 500 })
+      request<EventRecord[]>('events_list', { session_id: null, limit: 20000, since })
         .then((e) => live && setEvents(e))
         .catch(() => {});
     };

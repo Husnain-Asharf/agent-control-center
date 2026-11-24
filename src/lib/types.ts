@@ -43,6 +43,10 @@ export interface Session {
   usage?: SessionUsage | null;
   /** The session that started this one as its helper. */
   lead_id?: string | null;
+  /** The branch the daemon made for this session; Remove deletes only this one. */
+  own_branch?: string | null;
+  /** When the session was first started; a restart keeps it. */
+  first_started_at?: number | null;
   status: SessionStatus;
   status_since: number;
   started_at: number;

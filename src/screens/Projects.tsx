@@ -184,8 +184,9 @@ export function ProjectPage() {
           }
         >
           <p className="muted">
-            {project.name} and its sessions leave the app. The folder and its git history stay as they are. Stop its
-            running sessions first.
+            {project.name}, its sessions and its saved rules leave the app. The folder, its git history, and the
+            worktrees and agent/ branches of its sessions stay as they are; remove those sessions first to clean them
+            up. Stop its running sessions first.
           </p>
           <div className="dialog-actions">
             <button type="button" className="btn btn--ghost" onClick={() => setRemoving(false)}>

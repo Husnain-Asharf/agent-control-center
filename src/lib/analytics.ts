@@ -75,12 +75,12 @@ export function costInRange(samples: UsageSample[], sessions: Record<string, Ses
   const out = new Map<string, number>();
   for (const [id, f] of first) {
     const s = sessions[id];
-    const base = s && s.started_at >= since ? 0 : f;
+    const base = s && (s.first_started_at ?? s.started_at) >= since ? 0 : f;
     const end = Math.max(last.get(id) ?? f, s?.usage?.cost_usd ?? 0);
     out.set(id, Math.max(0, end - base));
   }
   for (const s of Object.values(sessions)) {
-    if (!out.has(s.id) && s.usage && s.started_at >= since) out.set(s.id, Math.max(0, s.usage.cost_usd));
+    if (!out.has(s.id) && s.usage && (s.first_started_at ?? s.started_at) >= since) out.set(s.id, Math.max(0, s.usage.cost_usd));
   }
   return out;
 }
@@ -133,7 +133,7 @@ export function costSeries(
     for (const r of sample.sessions) {
       if (!base.has(r.session_id)) {
         const s = sessions[r.session_id];
-        base.set(r.session_id, s && s.started_at >= since ? 0 : r.cost_usd);
+        base.set(r.session_id, s && (s.first_started_at ?? s.started_at) >= since ? 0 : r.cost_usd);
       }
       last.set(r.session_id, r.cost_usd);
       groups.add(groupOf(r.session_id));

@@ -13,6 +13,7 @@ const SHELL_TOOLS = ['Bash', 'PowerShell'];
 
 /** The headline for a request, by tool. */
 export function wantsText(tool: string): string {
+  if (tool === 'start_helper') return 'Wants to start a helper session';
   if (SHELL_TOOLS.includes(tool)) return 'Wants to run a command';
   if (EDIT_TOOLS.includes(tool)) return 'Wants to edit a file';
   return `Wants to use ${tool}`;
@@ -20,6 +21,7 @@ export function wantsText(tool: string): string {
 
 /** The short form used in the dock and toasts: `run`, `edit` or `use <tool>`. */
 export function wantsVerb(tool: string): string {
+  if (tool === 'start_helper') return 'start a helper:';
   if (SHELL_TOOLS.includes(tool)) return 'run';
   if (EDIT_TOOLS.includes(tool)) return 'edit';
   return `use ${tool}`;

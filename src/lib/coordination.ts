@@ -2,7 +2,7 @@ import type { EventRecord, Session } from './types';
 
 const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 /** Claude Code's tools for messages between local sessions. */
-const MESSAGE_TOOLS = ['SendMessage'];
+const MESSAGE_TOOLS = ['mcp__acc__send_message', 'SendMessage'];
 
 export interface SessionWork {
   sessionId: string;
