@@ -1146,7 +1146,8 @@ impl Daemon {
         if entry.session.status != SessionStatus::Idle {
             return Err(ApiError::bad_request("Compact works when the session is idle. Try again once its turn ends."));
         }
-        if entry.typed_at > entry.idle_at {
+        // A tie counts as typed: within a millisecond, the order is not known.
+        if entry.typed_at != 0 && entry.typed_at >= entry.idle_at {
             return Err(ApiError::bad_request(
                 "Something is typed in the session's input box. Send it or clear it, then compact.",
             ));
