@@ -8,7 +8,7 @@
 :root {
   --font-ui: "Geist", "SF Pro Text", system-ui, sans-serif;
   --font-code: "Geist Mono", ui-monospace, Menlo, monospace;
-  /* Weights. index.html loads Geist at 400 to 700 and Geist Mono at 400 to 600.
+  /* Weights. fonts.css bundles Geist at 400 to 700 and Geist Mono at 400 to 600.
      Code text inherits the first two; semibold code uses --w-code-semibold. */
   --w-regular: 400; --w-medium: 500; --w-semibold: 600;
   --w-code-semibold: 600;

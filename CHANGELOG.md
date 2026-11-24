@@ -14,6 +14,8 @@ follows [Semantic Versioning](https://semver.org/).
 - Glass blur on macOS picks a lighter or stronger system material (sharp,
   light, medium, strong), since macOS has no blur amount of its own.
   Settings says so when macOS refuses the see-through window.
+- The Geist fonts are bundled with the app (SIL Open Font License), so it no
+  longer loads them from Google Fonts and makes no network calls of its own.
 
 ## [0.6.0] - 2026-11-24
 

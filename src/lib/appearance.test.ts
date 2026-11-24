@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import appCss from '../styles/app.css?raw';
 import tokens from '../styles/tokens.css?raw';
-import indexHtml from '../../index.html?raw';
+import fontsCss from '../styles/fonts.css?raw';
 import { DEFAULT_TERM_FONT_SIZE, DEFAULT_TEXT_SCALE, TEXT_SCALES, applyTextScale, fittedScale, parseBolder, parseTermFontSize, parseTextScale, scaleLabel, setBolderAttr, stepTextScale, termFontWeight, type TextScale } from './appearance';
 
 afterEach(() => {
@@ -91,10 +91,13 @@ describe('setBolderAttr', () => {
   });
 });
 
-/** The weights index.html loads for a family, from its Google Fonts link. */
+/** The weights fonts.css bundles for a family, from its @font-face rules. */
 function loadedWeights(family: string): number[] {
-  const m = new RegExp(`family=${family.replace(/ /g, '\\+')}:wght@([\\d;]+)`).exec(indexHtml);
-  return m ? m[1].split(';').map(Number) : [];
+  const faces = [...fontsCss.matchAll(/@font-face\s*\{([^}]*)\}/g)].map((m) => m[1]);
+  return faces
+    .filter((f) => new RegExp(`font-family:\\s*"${family}"`).test(f))
+    .map((f) => Number(/font-weight:\s*(\d+)/.exec(f)?.[1]))
+    .sort((a, b) => a - b);
 }
 
 /** The weight variables one rule of tokens.css sets. */
@@ -112,7 +115,7 @@ describe('bolder text weights', () => {
   const bolder = { ...base, ...weightVars(':root[data-bolder]') };
   const steps = ['w-regular', 'w-medium', 'w-semibold'];
 
-  it('finds the loaded weights in index.html', () => {
+  it('finds the bundled weights in fonts.css', () => {
     expect(ui.length).toBeGreaterThan(0);
     expect(code.length).toBeGreaterThan(0);
   });

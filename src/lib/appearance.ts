@@ -36,7 +36,7 @@ export function stepTextScale(current: TextScale, dir: 1 | -1): TextScale {
 export const scaleLabel = (scale: number): string => `${Math.round(scale * 100)}%`;
 
 /**
- * The terminal's normal font weight. index.html loads Geist Mono at 400, 500 and 600, and
+ * The terminal's normal font weight. fonts.css bundles Geist Mono at 400, 500 and 600, and
  * bold terminal text already uses 600, the heaviest, so only the normal weight goes up.
  */
 export const termFontWeight = (bolder: boolean): number => (bolder ? 500 : 400);
