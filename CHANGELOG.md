@@ -16,6 +16,29 @@ follows [Semantic Versioning](https://semver.org/).
   Settings says so when macOS refuses the see-through window.
 - The Geist fonts are bundled with the app (SIL Open Font License), so it no
   longer loads them from Google Fonts and makes no network calls of its own.
+- A message between sessions can no longer press keys in the other session:
+  titles lose control characters, and messages arrive as a paste once the
+  session is idle, never in the middle of one of Claude Code's own questions.
+- Compact refuses while a session works or has something typed in its input
+  box, so a half-typed line is not sent with it.
+- Removing a session deletes only the `agent/` branch the app made for it,
+  never a branch its worktree was switched to later.
+- Starting a helper is asked by the app itself, in every permission mode, and
+  the card shows the helper's task. A helper cannot start helpers, and a lead
+  runs at most 4. Stopping a lead offers to stop its helpers.
+- A task that starts with `-` is no longer read as a Claude Code option.
+- The note a session in a shared folder gets names the app's own tools, and
+  the Coordination view counts their messages.
+- Coordination and Analytics read the events of their project and range, not
+  the newest 500, and Analytics fetches only new samples each minute. A
+  restarted session's earlier cost is no longer counted again.
+- Worktree sizes are measured one walk at a time, and stopped ones rarely.
+- Old events and finished approvals are deleted after 30 days, long inputs
+  are shortened in the store, and a session keeps its last 1,000 status
+  changes.
+- The branch question no longer runs git while the daemon is busy.
+- The tool server refuses clearly outside an app session and answers bad
+  input with a proper error.
 
 ## [0.6.0] - 2026-11-24
 

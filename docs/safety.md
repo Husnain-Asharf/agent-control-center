@@ -93,13 +93,15 @@ Memory is that of Claude Code and every process it started, read from `ps` (not 
 
 **Removing.** A stopped session can be removed from the app with its history. For a session with its own worktree, you can also delete the worktree and its branch: `git worktree remove` keeps a worktree with changes, and `git branch -d` keeps a branch that is not merged, and the app says which it kept. Removing a project removes it and its sessions from the app. Folders and git history are never deleted.
 
+**Stored data.** Events and finished approvals older than 30 days are deleted once an hour. An approval keeps only the first 4,096 characters of each value of its input (a Write's file content, an Edit's text), and a session keeps its last 1,000 status changes.
+
 **Analytics.** While a session runs, the daemon keeps a sample once a minute in `acc.db` (table `samples`): the plan's use and each running session's cost, context and memory. Samples older than 7 days are deleted.
 
-**Compact.** Compact types `/compact` into an idle session's terminal, as you would. Claude Code then sums up the conversation so far, which frees context.
+**Compact.** Compact types `/compact` into an idle session's terminal, as you would. The daemon refuses while the session is working or when something is typed in its input box since it went idle, so a half-typed line is never sent with it. Claude Code then sums up the conversation so far, which frees context.
 
 **Restart.** Restart the daemon stops every session, like `pkill accd`, and the app starts a new daemon. Restart the app only reopens the window; sessions keep running.
 
-**Helpers and messages.** Each session gets three tools of its own from a small tool server in `acc-hook` (`acc-hook mcp`, passed with `--mcp-config`): `start_helper` starts a helper session in the project folder with a task as its first message, `list_sessions` lists the running sessions in the folder, and `send_message` types a message into another of them, marked with who it is from (Claude Code queues it while that session is busy). Starting a helper asks you in the inbox each time; listing and messaging do not. A message is joined to one line and loses its control characters, so it cannot press keys of its own. Only sessions in the project folder can start helpers, and messages go only between sessions in the same folder. Any process of yours can reach the daemon's socket (see Known limitations), so this adds no new way in.
+**Helpers and messages.** Each session gets three tools of its own from a small tool server in `acc-hook` (`acc-hook mcp`, passed with `--mcp-config`): `start_helper` starts a helper session in the project folder with a task as its first message, `list_sessions` lists the running sessions in the folder, and `send_message` types a message into another of them, marked with who it is from (Claude Code queues it while that session is busy). Starting a helper asks you in the inbox each time, from the daemon itself, so it asks in every Claude Code permission mode; listing and messaging do not ask. Only a session in the project folder can start helpers, a helper cannot start its own, and a lead runs at most 4 at once. A message goes only to another session in the same folder. It is joined to one line, loses its control characters, holds at most 4,000 characters, and arrives as a paste once the session is idle, so it cannot press keys, pick a menu entry or answer one of Claude Code's own questions. Up to 20 messages wait for a busy session. Session titles lose control characters too. Any process of yours can reach the daemon's socket (see Known limitations), so this adds no new way in.
 
 ## Keyboard shortcuts
 
@@ -179,6 +181,6 @@ On Windows: `taskkill /IM accd.exe /F`.
 - On Windows the `-setup.exe` ends the daemon before it upgrades or uninstalls the app, and running sessions end with it. The `.msi` does not: end the daemon first (`taskkill /IM accd.exe /F`), as you must before uninstalling 0.3.0, because Windows cannot replace or remove the files of a running program.
 - If you set `ACC_DATA_DIR` on Windows, point it at a folder only you can open. The default, under `%LOCALAPPDATA%`, is private.
 - On Windows, a task for a `claude.cmd` (npm) can be about 7,000 characters at most, because that is what cmd.exe can run. The native `claude.exe` takes longer ones.
-- Worktrees and `agent/*` branches are never removed. Remove them yourself (`git worktree remove`, `git branch -D`) when you no longer need them.
+- Removing a session with its worktree deletes the worktree, files git ignores in it included (`.env.local`, build output), and the `agent/` branch the app made for it, only when git can do so without losing work. A branch the worktree was switched to later is never deleted. Removing a project leaves its worktrees and branches; remove its sessions first to clean them up.
 - A worktree starts from the repo's `HEAD`, so uncommitted changes in your checkout are not in it.
 - Local only: one machine, no remote hosts. Windows builds are x64 only, and Linux builds x86_64 only.
