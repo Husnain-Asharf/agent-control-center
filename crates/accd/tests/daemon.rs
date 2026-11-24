@@ -1690,7 +1690,7 @@ async fn a_claude_cmd_gets_the_task_as_typed() {
     let mcp = h.data.join("sessions").join(&s.id).join("mcp.json");
     assert_eq!(
         run["args"],
-        json!(["--settings", settings.to_string_lossy(), "--mcp-config", mcp.to_string_lossy(), "--session-id", s.id, task])
+        json!(["--settings", settings.to_string_lossy(), "--mcp-config", mcp.to_string_lossy(), "--session-id", s.id, "--", task])
     );
     assert_eq!(run["batch_command"], Value::Null, "the command line is not passed on");
 
